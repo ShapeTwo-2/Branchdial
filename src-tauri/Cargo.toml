@@ -1,0 +1,25 @@
+[package]
+name = "branchdial"
+version = "1.0.0"
+description = "A real terminal with one-click git workflow buttons"
+authors = ["Abdallah"]
+license = "MIT"
+edition = "2021"
+
+[lib]
+# The `_lib` suffix avoids a name clash with the binary on Windows.
+name = "branchdial_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7.3", features = [] }
+
+[dependencies]
+dirs = "7.0.0"
+os_info = "3.15.0"
+portable-pty = "0.9.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+serde_yaml = "0.9.34"
+sha2 = "0.11.1"
+tauri = { version = "2.12.4", features = [] }

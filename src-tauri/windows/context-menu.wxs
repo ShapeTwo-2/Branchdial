@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Branchdial MSI fragment (bundle.windows.wix.fragmentPaths / componentRefs).
+  Adds "Open Branchdial here" to Explorer's right-click menu: on a folder, and
+  on the empty space inside a folder. The MSI installs per machine, so the
+  entries go under HKLM; Windows Installer removes them on uninstall.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="ExplorerContextMenu" Guid="{B19B7403-7C0E-4E6C-A347-478EA3E2F141}">
+        <RegistryKey Root="HKLM" Key="Software\Classes\Directory\Background\shell\Branchdial">
+          <RegistryValue Type="string" Value="Open Branchdial here" KeyPath="yes" />
+          <RegistryValue Name="Icon" Type="string" Value="&quot;[INSTALLDIR]branchdial.exe&quot;" />
+          <RegistryKey Key="command">
+            <RegistryValue Type="string" Value="&quot;[INSTALLDIR]branchdial.exe&quot; &quot;%V&quot;" />
+          </RegistryKey>
+        </RegistryKey>
+        <RegistryKey Root="HKLM" Key="Software\Classes\Directory\shell\Branchdial">
+          <RegistryValue Type="string" Value="Open Branchdial here" />
+          <RegistryValue Name="Icon" Type="string" Value="&quot;[INSTALLDIR]branchdial.exe&quot;" />
+          <RegistryKey Key="command">
+            <RegistryValue Type="string" Value="&quot;[INSTALLDIR]branchdial.exe&quot; &quot;%1&quot;" />
+          </RegistryKey>
+        </RegistryKey>
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+</Wix>

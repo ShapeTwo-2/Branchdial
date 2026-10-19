@@ -1,0 +1,117 @@
+# Branchdial built-in recipes.
+#
+# Override any of these by id in ~/.branchdial/recipes.yml or in .branchdial.yml
+# at your repo root, or hide one with `- { id: <id>, disabled: true }`.
+#
+# Placeholders like {{branch}} are always inserted as a safely quoted shell word.
+# Built-in variables: {{current_branch}}, {{default_branch}}, {{repo_root}},
+# {{operation}} (merge / rebase / cherry-pick / revert, or empty).
+
+- id: bcp
+  name: New branch + commit + push
+  description: Create a branch, commit all changes, push and set upstream
+  inputs:
+    - { id: branch, label: Branch name, type: branch, exists: false, placeholder: feature/login, required: true }
+    - { id: msg, label: Commit message, required: true }
+  steps:
+    - git checkout -b "{{branch}}"
+    - git add -A
+    - git commit -m "{{msg}}"
+    - git push -u origin "{{branch}}"
+
+- id: merge-into
+  name: Merge into…
+  description: Merge the current branch into dev/staging/prod, push, then come back
+  confirm: true
+  inputs:
+    - { id: target, label: Target branch, type: select, options: [dev, staging, prod], default: dev }
+    - { id: no_ff, label: Always create a merge commit (--no-ff), type: bool, default: true }
+  steps:
+    - git checkout "{{target}}"
+    - git pull --ff-only
+    - run: git merge --no-ff "{{current_branch}}"
+      when: no_ff
+    - run: git merge "{{current_branch}}"
+      when: "!no_ff"
+    - git push
+    - run: git checkout "{{current_branch}}"
+      always: true
+
+- id: sync-main
+  name: Sync with main
+  description: Fetch, then rebase onto or merge the default branch from origin
+  inputs:
+    - { id: strategy, label: How, type: select, options: [rebase, merge], default: rebase }
+  steps:
+    - git fetch origin
+    - run: git rebase "origin/{{default_branch}}"
+      when: strategy == rebase
+    - run: git merge "origin/{{default_branch}}"
+      when: strategy == merge
+
+- id: stash-switch
+  name: Stash & switch
+  description: Stash all changes (including untracked), switch branch, optionally bring the changes along
+  inputs:
+    - { id: branch, label: Switch to, type: branch, exists: true, required: true }
+    - { id: pop, label: Pop the stash on the new branch, type: bool, default: false }
+  steps:
+    - 'git stash push -u -m "branchdial: switch to {{branch}}"'
+    - git switch "{{branch}}"
+    # Only pop the stash this recipe created, never an older one.
+    # (YAML single quotes because the command contains ": ".)
+    - run: 'if git stash list -1 --format=%s | grep -qxF "On {{current_branch}}: branchdial: switch to {{branch}}"; then git stash pop; else echo "Nothing was stashed, skipping pop"; fi'
+      when: pop
+
+- id: version-bump
+  name: Version bump + tag + push
+  description: Bump every version file, commit "chore release", tag vX.Y.Z and push both
+  confirm: true
+  inputs:
+    - { id: bump, label: Bump, type: select, options: [patch, minor, major], default: patch }
+  version:
+    bump: bump
+    # Files that don't exist (or have no version) are skipped. Override this recipe
+    # in .branchdial.yml to list your own.
+    files: [package.json, Cargo.toml, src-tauri/Cargo.toml, tauri.conf.json, src-tauri/tauri.conf.json]
+  steps:
+    - update_version_files: true
+    - git add -- {{version_files}}
+    - 'git commit -m "chore: release v{{new_version}}" -- {{version_files}}'
+    - git tag -a "v{{new_version}}" -m "v{{new_version}}"
+    - git push --follow-tags
+
+- id: abort-go-back
+  name: Abort merge/rebase & go back
+  description: Abort the merge, rebase, cherry-pick or revert in progress and return to where you were
+  confirm: true
+  requires:
+    - { when: operation, message: "Nothing to abort: no merge, rebase, cherry-pick or revert is in progress." }
+  steps:
+    - run: git merge --abort
+      when: operation == merge
+    - run: git rebase --abort
+      when: operation == rebase
+    - run: git cherry-pick --abort
+      when: operation == cherry-pick
+    - run: git revert --abort
+      when: operation == revert
+    # A merge happens on the target branch, so go back to the branch you came from.
+    # (rebase --abort already puts you back on your branch.)
+    - run: git checkout -
+      when: operation == merge
+
+- id: undo-commit
+  name: Undo last commit
+  description: Remove the last commit but keep its changes staged
+  confirm: true
+  steps:
+    - git reset --soft HEAD~1
+
+- id: clean-merged
+  name: Clean merged branches
+  description: Delete local branches already merged into the default branch
+  confirm: true
+  steps:
+    - git fetch --prune
+    - git branch --merged "{{default_branch}}" --format="%(refname:short)" | grep -vxF -e "{{default_branch}}" -e "{{current_branch}}" -e main -e master -e dev -e develop -e staging -e prod -e production | grep -v "^release/" | xargs -r git branch -d
