@@ -19,6 +19,27 @@
     - git commit -m "{{msg}}"
     - git push -u origin "{{branch}}"
 
+- id: delete-branch
+  name: Delete branch
+  description: Switch to another branch, delete a branch locally, and optionally on origin too
+  confirm: true
+  inputs:
+    - { id: switch_to, label: Switch to, type: branch, exists: true, required: true }
+    - { id: branch, label: Branch to delete, type: branch, exists: true, required: true }
+    - { id: remote, label: Also delete the remote branch on origin, type: bool, default: false }
+  steps:
+    - git switch "{{switch_to}}"
+    # -d also accepts a branch merged only into its upstream, which is about to be
+    # deleted too, so before deleting the remote make sure this branch has the commits.
+    # (`false`, not `exit 1`: the steps are typed into your shell.)
+    - run: 'git merge-base --is-ancestor "{{branch}}" HEAD || { echo "{{branch}} is not merged into {{switch_to}}, not deleting it"; false; }'
+      when: remote
+    - git branch -d "{{branch}}"
+    - run: git push origin --delete "{{branch}}"
+      when: remote
+    - run: git fetch --prune
+      when: remote
+
 - id: merge-into
   name: Merge into…
   description: Merge the current branch into dev/staging/prod, push, then come back

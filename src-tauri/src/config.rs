@@ -6,6 +6,7 @@
 //!   args: [--login, -i]
 //! startDir: ~/code
 //! protectedBranches: [main, master, prod, production, staging, "release/*"]
+//! checkForUpdates: false
 //! ```
 
 use serde::Deserialize;
@@ -20,6 +21,8 @@ pub struct Config {
     pub start_dir: Option<String>,
     /// Replaces the default protected branches (a repo's .branchdial.yml can override again).
     pub protected_branches: Option<Vec<String>>,
+    /// Look for a new version on startup (default true).
+    pub check_for_updates: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -77,13 +80,14 @@ mod tests {
     #[test]
     fn parses_full_config() {
         let c: Config = serde_yaml::from_str(
-            "shell:\n  path: /bin/zsh\n  args: [-l]\nstartDir: ~/code\n",
+            "shell:\n  path: /bin/zsh\n  args: [-l]\nstartDir: ~/code\ncheckForUpdates: false\n",
         )
         .unwrap();
         let shell = c.shell.unwrap();
         assert_eq!(shell.path, "/bin/zsh");
         assert_eq!(shell.args.unwrap(), vec!["-l"]);
         assert_eq!(c.start_dir.as_deref(), Some("~/code"));
+        assert_eq!(c.check_for_updates, Some(false));
     }
 
     #[test]

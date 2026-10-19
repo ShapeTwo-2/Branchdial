@@ -11,6 +11,7 @@ interface Props {
   onOpen: (recipe: Recipe) => void;
   onAdd: () => void;
   onReviewTrust: () => void;
+  onCheckUpdates: () => void;
 }
 
 function basename(path: string) {
@@ -19,7 +20,7 @@ function basename(path: string) {
 
 const SOURCE_LABEL = { builtin: null, global: "global", repo: "repo" } as const;
 
-export function Sidebar({ statusBar, list, listError, disabledReason, onRefresh, onOpen, onAdd, onReviewTrust }: Props) {
+export function Sidebar({ statusBar, list, listError, disabledReason, onRefresh, onOpen, onAdd, onReviewTrust, onCheckUpdates }: Props) {
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">Branchdial</div>
@@ -72,6 +73,9 @@ export function Sidebar({ statusBar, list, listError, disabledReason, onRefresh,
           + Add recipe
         </button>
       </section>
+      <button className="update-btn" onClick={onCheckUpdates}>
+        Check for updates
+      </button>
     </aside>
   );
 }
