@@ -32,6 +32,16 @@ Download the installer for your platform from the
 
 Or build it yourself (see [Development](#development)).
 
+### Updates
+
+Branchdial checks for a new version a few seconds after it starts and asks before installing
+it: **Update now** downloads it, verifies its signature, installs it and restarts; **Later** asks
+again next launch; **Skip this version** stays quiet until the next one. **Check for updates** at
+the bottom of the sidebar checks at any time. Updates wait while a recipe is running. Set
+`checkForUpdates: false` in the [config](#configuration) to turn off the startup check.
+
+On Linux only the `.AppImage` updates itself; with the `.deb`, install the new one from Releases.
+
 ## Using it
 
 - **Terminal:** a real shell (Git Bash on Windows, your `$SHELL` elsewhere). `cd` into a repo and
@@ -48,6 +58,7 @@ Or build it yourself (see [Development](#development)).
 | Recipe | What it runs |
 |---|---|
 | New branch + commit + push | `checkout -b`, `add -A` (with file picker), `commit -m`, `push -u` |
+| Delete branch | `switch` to another branch, `branch -d` (refuses unmerged branches), optionally `push origin --delete` + `fetch --prune` (only if the branch is merged into the one you switched to) |
 | Merge into… | merge the current branch into dev / staging / prod (`pull --ff-only`, optional `--no-ff`), push, and always return to your branch |
 | Sync with main | `fetch`, then `rebase` or `merge` the default branch from origin |
 | Stash & switch | stash everything (incl. untracked), switch, optionally pop only that stash |
@@ -181,6 +192,7 @@ shell:
   args: [--login, -i]                       # custom args turn off recipe support (see below)
 startDir: ~/code                            # default: your home directory
 protectedBranches: [main, master, "release/*"]
+checkForUpdates: false                      # default: true
 ```
 
 **How steps know when a command finished:** Branchdial starts bash with
@@ -211,7 +223,37 @@ Tests run real git in throwaway repos under the system temp directory, with a lo
 for every push to `main` and every pull request. Pushing a `v*` tag builds installers for all
 three into a draft GitHub release.
 
+**Releasing updates:** the release workflow signs the update files with the private key in the
+`TAURI_SIGNING_PRIVATE_KEY` (and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) repo secrets and uploads
+`latest.json`, which installed apps read from the latest *published* release, so users are offered
+the update only once you publish the draft. The matching public key is in
+`src-tauri/tauri.conf.json`. Keep a backup of the private key: without it, installed copies can't
+verify, and so won't install, any future update. A local `npm run tauri build` needs the same two
+variables set.
+
+## Code signing policy
+
+Free code signing for Windows is provided by [SignPath.io](https://signpath.io), certificate by
+[SignPath Foundation](https://signpath.org).
+
+- Committers and reviewers: [Members team](https://github.com/orgs/ShapeTwo-2/people)
+- Approvers: [Owners](https://github.com/orgs/ShapeTwo-2/people?query=role%3Aowner)
+
+Every signed file is built from this repository's source by the GitHub Actions release workflow.
+A release is signed only after an approver reviews and approves the signing request.
+
+## Privacy
+
+Branchdial does not collect or send any data about you or your use of the app. It connects to the
+internet in two cases only:
+
+- **Update check:** on startup (unless `checkForUpdates: false`) and when you click
+  **Check for updates**, it downloads `latest.json` from this repository's GitHub releases, and
+  downloads the update itself only if you choose to install it. GitHub sees the request like any
+  web request ([GitHub's privacy statement](https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement)).
+- **Commands you run:** git commands in the terminal or in recipes (fetch, pull, push…) talk to
+  the remotes you configured, exactly as they would in any other terminal.
+
 ## License
 
 [MIT](LICENSE)
-# Branchdial

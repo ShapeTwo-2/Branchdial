@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window: core events/window APIs plus Branchdial's own commands. No shell or filesystem plugins.",
+  "description": "Main window: core events/window APIs plus Branchdial's own commands, and the updater (check, download, install, restart). No shell or filesystem plugins.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "updater:default", "process:allow-restart"]
 }
