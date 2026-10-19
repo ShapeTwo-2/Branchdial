@@ -239,6 +239,41 @@ mod builtin_tests {
     }
 
     #[test]
+    fn delete_branch_local_and_remote() {
+        let r = TempRepo::new("delete");
+        let on_origin = |b: &str| git::git(&r.origin, &["rev-parse", "-q", "--verify", &format!("refs/heads/{b}")]).is_some();
+        let local = |b: &str| git::git(&r.work, &["rev-parse", "-q", "--verify", &format!("refs/heads/{b}")]).is_some();
+        for b in ["feat/local", "feat/both"] {
+            r.git(&["checkout", "-q", "-b", b]);
+            r.git(&["push", "-q", "-u", "origin", b]);
+        }
+
+        // Unchecked: only the local branch goes.
+        let res = run(&r, "delete-branch", &[("switch_to", json!("main")), ("branch", json!("feat/local"))]);
+        assert!(all_ok(&res), "{res:?}");
+        assert_eq!(res.len(), 2);
+        assert_eq!(head(&r), "main");
+        assert!(!local("feat/local"));
+        assert!(on_origin("feat/local"));
+
+        // Checked: also deleted on origin, and the stale origin/feat/both ref is pruned.
+        let res = run(&r, "delete-branch", &[("switch_to", json!("main")), ("branch", json!("feat/both")), ("remote", json!(true))]);
+        assert!(all_ok(&res), "{res:?}");
+        assert!(!local("feat/both"));
+        assert!(!on_origin("feat/both"));
+        assert!(git::git(&r.work, &["rev-parse", "-q", "--verify", "refs/remotes/origin/feat/both"]).is_none());
+
+        // Unmerged: -d refuses, and the remote branch is left alone.
+        r.git(&["checkout", "-q", "-b", "feat/wip"]);
+        commit_file(&r, "wip.txt", "wip");
+        r.git(&["push", "-q", "-u", "origin", "feat/wip"]);
+        let res = run(&r, "delete-branch", &[("switch_to", json!("main")), ("branch", json!("feat/wip")), ("remote", json!(true))]);
+        assert!(!all_ok(&res), "{res:?}");
+        assert!(local("feat/wip"));
+        assert!(on_origin("feat/wip"));
+    }
+
+    #[test]
     fn merge_into_returns_even_when_push_fails() {
         let r = TempRepo::new("merge");
         r.git(&["checkout", "-q", "-b", "dev"]);

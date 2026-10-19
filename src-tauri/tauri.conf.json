@@ -29,13 +29,15 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "category": "DeveloperTool",
     "shortDescription": "A real terminal with one-click git workflow buttons",
     "copyright": "Copyright (c) 2026 Branchdial contributors",
     "licenseFile": "../LICENSE",
     "windows": {
       "nsis": {
-        "installerHooks": "windows/hooks.nsh"
+        "installerHooks": "windows/hooks.nsh",
+        "installerIcon": "icons/icon.ico"
       },
       "wix": {
         "fragmentPaths": ["windows/context-menu.wxs"],
@@ -49,5 +51,14 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUxNjdCRkY4MDUxODVENUYKUldSZlhSZ0YrTDluVVEyeGlyK2xpL1RvTGNDc3QrM1Q0RiswUVpLVmNrNHVVZlZkZDI3bTlyc0gK",
+      "endpoints": ["https://github.com/ShapeTwo-2/Branchdial/releases/latest/download/latest.json"],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

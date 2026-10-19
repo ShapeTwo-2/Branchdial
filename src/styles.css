@@ -279,6 +279,22 @@ pre {
   border-color: var(--muted);
 }
 
+.update-btn {
+  margin: 0 14px 10px;
+  padding: 4px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.update-btn:hover {
+  color: var(--text);
+}
+
 .icon-btn {
   border: none;
   background: transparent;
@@ -611,6 +627,24 @@ pre {
   max-height: 50vh;
   overflow: auto;
   color: var(--text);
+}
+
+.update-notes {
+  max-height: 40vh;
+  overflow: auto;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.update-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.update-progress progress {
+  flex: 1;
+  accent-color: var(--accent);
 }
 
 .conflict-box {

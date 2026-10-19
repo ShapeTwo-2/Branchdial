@@ -3,6 +3,8 @@
 
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import type {
   GitInfo,
   InputValues,
@@ -82,6 +84,36 @@ export function conflictAbort(): Promise<void> {
 
 export function recipeCancel(): Promise<void> {
   return invoke("recipe_cancel");
+}
+
+export type { Update };
+
+/** `checkForUpdates` from ~/.branchdial/config.yml (default true). */
+export function updatesAutoCheck(): Promise<boolean> {
+  return invoke<boolean>("updates_auto_check");
+}
+
+/** The newer release, or null when this is the latest. The signature is checked on download. */
+export function updateCheck(): Promise<Update | null> {
+  return check();
+}
+
+/**
+ * Downloads, verifies and installs the update, then restarts. The backend refuses
+ * while a recipe is running and closes the shell first. On Windows the installer
+ * quits the app itself, so this never returns there.
+ */
+export async function updateInstall(update: Update, onProgress: (done: number, total: number | null) => void): Promise<void> {
+  let done = 0;
+  let total: number | null = null;
+  await update.download((e) => {
+    if (e.event === "Started") total = e.data.contentLength ?? null;
+    else if (e.event === "Progress") done += e.data.chunkLength;
+    onProgress(done, total);
+  });
+  await invoke("updates_prepare_install");
+  await update.install();
+  await relaunch();
 }
 
 function on<T>(event: string, handler: (payload: T) => void): Promise<UnlistenFn> {
