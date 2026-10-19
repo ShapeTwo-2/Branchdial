@@ -1,6 +1,6 @@
 [package]
 name = "branchdial"
-version = "1.0.1"
+version = "1.0.2"
 description = "A real terminal with one-click git workflow buttons"
 authors = ["Abdallah"]
 license = "MIT"
