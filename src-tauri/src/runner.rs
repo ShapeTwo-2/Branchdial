@@ -44,6 +44,7 @@ pub struct Run {
     failure: Option<(usize, i32)>,
     /// Set when the user presses Ctrl+C (or clicks Stop) during a run.
     pub cancel_requested: bool,
+    temp_files: Vec<PathBuf>,
 }
 
 /// A recipe stopped by a conflict, waiting for Resolve → Continue or Abort.
@@ -52,6 +53,8 @@ pub struct Suspended {
     pub name: String,
     pub remaining: Vec<PlannedStep>,
     pub start_branch: Option<String>,
+    /// Files the remaining steps still read (see [`RunMeta::temp_files`]).
+    pub temp_files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -65,6 +68,14 @@ pub struct RunMeta {
     pub name: String,
     /// The branch checked out when the recipe started, for "go back".
     pub start_branch: Option<String>,
+    /// Files the steps read (e.g. a pathspec file), deleted when the run is over.
+    pub temp_files: Vec<PathBuf>,
+}
+
+fn remove_temp_files(files: &[PathBuf]) {
+    for f in files {
+        let _ = std::fs::remove_file(f);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -191,11 +202,16 @@ pub fn start(
         current: 0,
         failure: None,
         cancel_requested: false,
+        temp_files: meta.temp_files,
     };
     let mut events = vec![Event::Started(RunStarted { name: run.name.clone(), steps: run.steps.clone() })];
     events.push(type_step(&mut run, shell, sink, 0)?);
+    // A new run replaces a suspended one; its files go unless this run took them over.
+    if let Some(old) = state.suspended.take() {
+        let dropped: Vec<PathBuf> = old.temp_files.into_iter().filter(|f| !run.temp_files.contains(f)).collect();
+        remove_temp_files(&dropped);
+    }
     state.run = Some(run);
-    state.suspended = None;
     Ok(events)
 }
 
@@ -280,9 +296,17 @@ pub fn handle_prompt(shell: &mut ShellStatus, state: &mut RunnerState, sink: &mu
         (RunStatus::Failed, Some(_), Some((failed, _))) => {
             let rest = run.steps[failed + 1..].to_vec();
             remaining = rest.len();
-            Some(Suspended { name: run.name.clone(), remaining: rest, start_branch: run.start_branch.clone() })
+            Some(Suspended {
+                name: run.name.clone(),
+                remaining: rest,
+                start_branch: run.start_branch.clone(),
+                temp_files: run.temp_files.clone(),
+            })
         }
-        _ => None,
+        _ => {
+            remove_temp_files(&run.temp_files);
+            None
+        }
     };
     events.push(Event::Done(RunDone {
         status,
@@ -387,17 +411,17 @@ pub async fn conflict_continue(app: AppHandle, state: State<'_, PtyState>) -> Re
     if let Some(op) = git::operation_in_progress(&root) {
         steps.push(PlannedStep { command: continue_command(op).into(), always: false });
     }
-    let (name, start_branch) = match suspended {
+    let (name, start_branch, temp_files) = match suspended {
         Some(s) => {
             steps.extend(s.remaining);
-            (format!("{} (continued)", s.name), s.start_branch)
+            (format!("{} (continued)", s.name), s.start_branch, s.temp_files)
         }
-        None => ("Continue".to_string(), None),
+        None => ("Continue".to_string(), None, vec![]),
     };
     if steps.is_empty() {
         return Err("Nothing to continue.".into());
     }
-    start_in_app(&app, &state, RunMeta { name, start_branch }, steps)
+    start_in_app(&app, &state, RunMeta { name, start_branch, temp_files }, steps)
 }
 
 /// Aborts the operation in progress and returns to the branch the recipe started on.
@@ -407,7 +431,7 @@ pub async fn conflict_abort(app: AppHandle, state: State<'_, PtyState>) -> Resul
     let op = git::operation_in_progress(&root).ok_or("No merge, rebase, cherry-pick or revert is in progress.")?;
     let start_branch = state.shared.lock().unwrap().runner.suspended.as_ref().and_then(|s| s.start_branch.clone());
     let steps = abort_steps(op, start_branch.as_deref());
-    start_in_app(&app, &state, RunMeta { name: "Abort & go back".into(), start_branch: None }, steps)
+    start_in_app(&app, &state, RunMeta { name: "Abort & go back".into(), start_branch: None, temp_files: vec![] }, steps)
 }
 
 #[cfg(test)]
@@ -433,7 +457,7 @@ mod tests {
     }
 
     fn meta(name: &str) -> RunMeta {
-        RunMeta { name: name.into(), start_branch: Some("feat".into()) }
+        RunMeta { name: name.into(), start_branch: Some("feat".into()), temp_files: vec![] }
     }
 
     fn ready_shell() -> ShellStatus {
@@ -462,6 +486,45 @@ mod tests {
         let ev = handle_prompt(&mut shell, &mut st, &mut sink, prompt(0));
         assert_eq!(done(&ev).unwrap().status, RunStatus::Ok);
         assert!(st.run.is_none() && st.suspended.is_none());
+    }
+
+    /// A run's temp files (pathspec lists) are deleted when it ends, kept while it is
+    /// suspended on a conflict, and deleted when a new run replaces the suspended one.
+    #[test]
+    fn temp_files_live_exactly_as_long_as_the_run() {
+        let dir = std::env::temp_dir().join(format!("branchdial-runner-tmp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = |n: &str| {
+            let p = dir.join(n);
+            std::fs::write(&p, "x").unwrap();
+            p
+        };
+        let with_file = |p: &PathBuf| RunMeta { temp_files: vec![p.clone()], ..meta("r") };
+
+        let (mut shell, mut st, mut sink) = (ready_shell(), RunnerState::default(), VecSink(vec![]));
+        let done_ok = file("ok");
+        start(&mut shell, &mut st, &mut sink, with_file(&done_ok), vec![step("a", false)]).unwrap();
+        assert!(done_ok.exists(), "kept while running");
+        handle_prompt(&mut shell, &mut st, &mut sink, prompt(0));
+        assert!(!done_ok.exists(), "deleted when the run is over");
+
+        let failed = file("failed");
+        start(&mut shell, &mut st, &mut sink, with_file(&failed), vec![step("a", false)]).unwrap();
+        handle_prompt(&mut shell, &mut st, &mut sink, prompt(1));
+        assert!(!failed.exists(), "deleted after a failure too");
+
+        // Suspended (no real conflict here, so build the state directly), then replaced.
+        let kept = file("kept");
+        st.suspended = Some(Suspended { name: "r".into(), remaining: vec![], start_branch: None, temp_files: vec![kept.clone()] });
+        start(&mut shell, &mut st, &mut sink, with_file(&kept), vec![step("a", false)]).unwrap();
+        assert!(kept.exists(), "a continued run takes the file over");
+        handle_prompt(&mut shell, &mut st, &mut sink, prompt(0));
+        assert!(!kept.exists());
+        let dropped = file("dropped");
+        st.suspended = Some(Suspended { name: "r".into(), remaining: vec![], start_branch: None, temp_files: vec![dropped.clone()] });
+        start(&mut shell, &mut st, &mut sink, meta("other"), vec![step("a", false)]).unwrap();
+        assert!(!dropped.exists(), "a different run discards the suspended one and its files");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
