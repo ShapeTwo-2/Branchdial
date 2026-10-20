@@ -35,35 +35,23 @@ fn probe(program: &Path) -> Option<GitInstall> {
     out.status.success().then(|| GitInstall { program: program.to_path_buf(), version })
 }
 
-/// Finds git once per run: PATH first, then (on Windows) the Git for Windows
-/// install folder, for installs that put only Git Bash on PATH.
+/// Finds git once per run, always as an absolute path (never a bare `git`, never
+/// a relative PATH entry). On Windows: the Git for Windows install the registry
+/// names first, then PATH, then the standard install folders.
 pub fn install() -> Option<&'static GitInstall> {
     static GIT: OnceLock<Option<GitInstall>> = OnceLock::new();
     GIT.get_or_init(|| {
-        if let Some(found) = probe(Path::new("git")) {
-            return Some(found);
-        }
+        let mut candidates: Vec<PathBuf> = Vec::new();
         #[cfg(windows)]
-        {
-            let mut candidates: Vec<PathBuf> = Vec::new();
-            if let Some(bash) = crate::shell::find_git_bash() {
-                // <root>\bin\bash.exe -> <root>\cmd\git.exe
-                if let Some(root) = bash.parent().and_then(Path::parent) {
-                    candidates.push(root.join("cmd").join("git.exe"));
-                }
-            }
-            for var in ["ProgramW6432", "ProgramFiles", "LOCALAPPDATA"] {
-                if let Ok(p) = std::env::var(var) {
-                    let base = PathBuf::from(p);
-                    candidates.push(base.join("Git").join("cmd").join("git.exe"));
-                    candidates.push(base.join("Programs").join("Git").join("cmd").join("git.exe"));
-                }
-            }
-            if let Some(found) = candidates.iter().filter(|c| c.is_file()).find_map(|c| probe(c)) {
-                return Some(found);
-            }
-        }
-        None
+        let roots = crate::shell::git_for_windows_roots();
+        #[cfg(windows)]
+        candidates.extend(roots.first().map(|r| r.join("cmd").join("git.exe")));
+        candidates.extend(crate::shell::find_in_path("git"));
+        #[cfg(windows)]
+        candidates.extend(roots.iter().map(|r| r.join("cmd").join("git.exe")));
+        #[cfg(not(windows))]
+        candidates.extend(["/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"].map(PathBuf::from));
+        candidates.iter().filter(|c| c.is_absolute() && c.is_file()).find_map(|c| probe(c))
     })
     .as_ref()
 }
@@ -432,6 +420,15 @@ mod tests {
         let bash = crate::shell::find_git_bash().unwrap();
         let git_exe = bash.parent().and_then(Path::parent).unwrap().join("cmd").join("git.exe");
         assert!(probe(&git_exe).is_some(), "{}", git_exe.display());
+    }
+
+    /// git is always run by an absolute path, never a bare name looked up at run time.
+    #[test]
+    fn git_is_resolved_to_an_absolute_path() {
+        let git = install().expect("git is required to develop Branchdial");
+        assert!(git.program.is_absolute(), "{}", git.program.display());
+        #[cfg(windows)]
+        assert!(crate::shell::git_for_windows_root().is_some(), "Git for Windows records its install folder");
     }
 
     #[test]
