@@ -52,6 +52,9 @@ pub fn render(
     let mut state = State::Plain;
     // Byte index in `out` of the `"` that opened the current double-quoted run.
     let mut dq_open = 0;
+    // Open `$(` and backtick substitutions: their contents are parsed by the shell again.
+    let mut subst = 0usize;
+    let mut backtick = false;
     let mut i = 0;
     while i < template.len() {
         let rest = &template[i..];
@@ -59,6 +62,19 @@ pub fn render(
 
         if state != State::Single {
             if let Some((name, len)) = placeholder_at(rest) {
+                // A quoted value is safe for one round of shell parsing, not two.
+                if subst > 0 || backtick {
+                    return Err(format!(
+                        "{{{{{name}}}}} is inside $(…) or backticks, where the shell parses it a second time and \
+                         quoting can't protect it. Use it as a plain argument instead."
+                    ));
+                }
+                if let Some(cmd) = reparsed_by_another_shell(&template[..i]) {
+                    return Err(format!(
+                        "{{{{{name}}}}} is passed to `{cmd}`, which runs it through a shell again, so quoting \
+                         can't protect it. Run the command directly instead."
+                    ));
+                }
                 let text = match lookup(name)? {
                     Value::Quoted(v) => sh_quote(&v),
                     Value::Words(_) if state == State::Double => {
@@ -109,6 +125,9 @@ pub fn render(
                 }
                 continue;
             }
+            (State::Plain | State::Double, '$') if rest[1..].starts_with('(') => subst += 1,
+            (State::Plain | State::Double, ')') if subst > 0 => subst -= 1,
+            (State::Plain | State::Double, '`') => backtick = !backtick,
             (State::Single, '{') if placeholder_at(rest).is_some() => {
                 return Err(format!(
                     "{} is inside single quotes, where it can't be inserted safely. Use double quotes or none.",
@@ -125,6 +144,28 @@ pub fn render(
         State::Single => Err("Unterminated single quote".into()),
         State::Double => Err("Unterminated double quote".into()),
     }
+}
+
+/// If the simple command that `prefix` ends in hands its arguments to another
+/// shell (`sh -c`, `bash -lc`, `eval`, `ssh`, `su -c`), the name of that command.
+/// Conservative: it looks at plain words, so it may refuse an odd but safe template.
+fn reparsed_by_another_shell(prefix: &str) -> Option<&'static str> {
+    let segment = prefix.rsplit([';', '&', '|', '\n', '(', '{', '`']).next().unwrap_or(prefix);
+    let words: Vec<&str> = segment.split_whitespace().map(|w| w.trim_matches(['"', '\''])).collect();
+    let name = |w: &str| w.rsplit(['/', '\\']).next().unwrap_or(w).trim_end_matches(".exe").to_string();
+    let has_c_flag = |from: usize| words[from..].iter().any(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('c'));
+    for (k, w) in words.iter().enumerate() {
+        match name(w).as_str() {
+            "eval" => return Some("eval"),
+            "ssh" => return Some("ssh"),
+            "sh" | "bash" | "zsh" | "dash" | "ksh" | "fish" | "pwsh" | "powershell" | "cmd" if has_c_flag(k + 1) => {
+                return Some("sh -c")
+            }
+            "su" if has_c_flag(k + 1) => return Some("su -c"),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Every placeholder name used in `template` (validates quoting too).
@@ -177,6 +218,44 @@ mod tests {
         assert!(r("echo '{{m}}'", &[("m", "x")]).is_err());
         // Braces that aren't a placeholder are fine there.
         assert_eq!(r("awk '{print $1}'", &[]).unwrap(), "awk '{print $1}'");
+    }
+
+    /// Contexts where the shell parses the text a second time: quoting the value
+    /// once can't make it safe, so the template is refused (at load time).
+    #[test]
+    fn rejects_placeholders_that_a_second_shell_would_parse() {
+        let x = [("b", "x"), ("m", "x")];
+        for t in [
+            r#"echo "$(echo {{b}})""#,
+            "echo $(git log {{b}})",
+            "echo `echo {{b}}`",
+            r#"echo "`echo {{b}}`""#,
+            r#"bash -c "git switch {{b}}""#,
+            r#"sh -c "git switch {{b}}""#,
+            r#"bash -lc "git switch {{b}}""#,
+            r#"sudo /bin/sh -c "x {{b}}""#,
+            "eval git switch {{b}}",
+            "ssh host git switch {{b}}",
+            r#"su - root -c "x {{b}}""#,
+            r#"git fetch && bash -c "git switch {{b}}""#,
+        ] {
+            assert!(r(t, &x).is_err(), "{t}");
+        }
+        // After a finished $(…), or in an ordinary command, a placeholder is fine.
+        assert_eq!(r(r#"git commit -m "$(date): {{m}}""#, &x).unwrap(), r#"git commit -m "$(date): "'x'"#);
+        assert!(r(r#"bash -c "true" && git switch {{b}}"#, &x).is_ok());
+        assert!(r("git switch {{b}} && echo done", &x).is_ok());
+    }
+
+    /// The motivating case: one round of quoting is undone by `bash -c`.
+    #[test]
+    fn nested_shell_really_would_have_been_injectable() {
+        let Some(bash) = test_bash() else { return };
+        let quoted = sh_quote("x; echo PWNED");
+        // What the template `bash -c "echo {{b}}"` used to render to:
+        let cmd = format!(r#"bash -c "echo "{quoted}"""#);
+        let out = std::process::Command::new(bash).args(["--norc", "-c", &cmd]).output().unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).contains("PWNED\n"), "the inner shell ran `echo PWNED`");
     }
 
     #[test]
