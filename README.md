@@ -74,10 +74,37 @@ On Linux only the `.AppImage` updates itself; with the `.deb`, install the new o
 
 ## Safety
 
-- **No injection.** Values from forms are always inserted as one single-quoted shell word.
-  Branch names are validated (no spaces, no leading `-`, git's ref rules).
+Branchdial is a terminal: you can run anything, and so can any recipe you trust. Two different
+things protect you, and only the first is a security boundary.
+
+### Security boundaries (against other people)
+
+These stop someone else (a cloned or downloaded repo, a teammate's recipe file, program output)
+from running commands you didn't choose. See [SECURITY.md](SECURITY.md) to report a problem.
+
+- **Team recipes need your trust.** A repo's `.branchdial.yml` could contain any command, so its
+  buttons only appear after you've reviewed the file, and again whenever it changes, shown as
+  a diff against the version you trusted.
 - **What you see is what runs.** The backend renders the commands, and refuses to run if they
-  changed since the preview (for example, you switched branches meanwhile).
+  differ from the preview you saw (for example, you switched branches meanwhile). Invisible or
+  text-direction Unicode characters are shown as red `⟨U+…⟩` badges in reviews and previews, and
+  refused in form values.
+- **Values can't become commands.** Form values, branch names and file names are inserted as one
+  single-quoted shell word; nothing containing control characters is ever typed into the shell;
+  branch names follow git's rules and can't start with `-`. Quoting protects one round of shell
+  parsing, so a recipe can't put a placeholder where a second shell would parse it (`$(…)`,
+  backticks, `bash -c`, `eval`, `ssh`): such files fail to load.
+- **Opening a folder runs nothing.** The status bar's background git calls ignore programs a
+  repo's own `.git/config` names (fsmonitor, filters, hooks), so `cd`-ing into a downloaded
+  project can't execute its code. Commands you type are unaffected.
+- **Program output can't drive recipes.** The "command finished" signal carries a random
+  per-session secret that programs never see, so output can't make a recipe skip ahead.
+
+### Mistake prevention (not a security boundary)
+
+These catch slips, not attacks. A recipe you trust can still do anything, for example through a
+git alias or a script these checks can't see into.
+
 - **Confirmation** for steps that push to a protected branch, force-push, delete a remote branch,
   reset, force-delete a branch (`branch -D`) or `clean -f`. Branchdial follows `checkout`/`switch`
   steps, so in *Merge into prod* it knows the later `git push` goes to `prod`. Protected
@@ -91,8 +118,6 @@ On Linux only the `.AppImage` updates itself; with the `.deb`, install the new o
 - **Conflicts:** when a recipe stops mid-merge or mid-rebase, the panel offers **Resolve** (lists
   the conflicted files; once they're fixed and `git add`ed, finishes the merge and runs the
   rest of the recipe) and **Abort & go back** (aborts and returns to the branch you started on).
-- **Team recipes need your trust.** A repo's `.branchdial.yml` could contain any command, so its
-  buttons only appear after you've reviewed the file, and again whenever it changes.
 
 ## Recipes
 
@@ -150,6 +175,11 @@ steps:
 
 - Placeholders are inserted as a safely quoted word. They work unquoted, as a whole `"{{x}}"`
   word, or inside double quotes (`"WIP: {{msg}}"`); inside single quotes they're rejected.
+- The quoting protects one round of shell parsing, so placeholders are also rejected where a
+  second shell would parse them again: inside `$(…)` or backticks, or as arguments of
+  `sh/bash/zsh -c`, `eval`, `ssh` or `su -c`. Run the command directly instead
+  (`git switch "{{branch}}"`, not `bash -c "git switch {{branch}}"`). After a finished `$(…)`
+  is fine: `-m "$(date): {{msg}}"`.
 - Built-in variables: `{{current_branch}}`, `{{default_branch}}`, `{{repo_root}}`, and
   `{{operation}}` (`merge`, `rebase`, `cherry-pick`, `revert`, or empty).
 - **YAML gotcha:** a step containing `": "` must be wrapped in single quotes, e.g.
@@ -176,7 +206,8 @@ A recipe with a `version:` block gets `{{version}}`, `{{new_version}}` and `{{ve
     bump: bump        # the input holding patch / minor / major (or an explicit 1.2.3)
     files: [package.json, src-tauri/Cargo.toml, src-tauri/tauri.conf.json]  # missing ones are skipped
   steps:
-    - update_version_files: true   # npm version for package.json, an in-place edit for the others
+    - update_version_files: true   # `npm version --ignore-scripts` for package.json (the repo's
+                                   # version scripts don't run), an in-place edit for the others
     - git add -- {{version_files}}
     - 'git commit -m "chore: release v{{new_version}}" -- {{version_files}}'
     - git tag -a "v{{new_version}}" -m "v{{new_version}}"
