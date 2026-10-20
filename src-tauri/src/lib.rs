@@ -26,6 +26,7 @@ pub fn run() {
             recipes::recipe_plan,
             recipes::recipe_run,
             recipes::git_branches,
+            recipes::git_branch_list,
             runner::recipe_cancel,
             runner::conflict_files,
             runner::conflict_continue,

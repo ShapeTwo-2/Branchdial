@@ -49,6 +49,10 @@ On Linux only the `.AppImage` updates itself; with the `.deb`, install the new o
 - **Status bar:** current branch, commits ahead/behind its upstream, changed files, and a banner
   while a merge or rebase is in progress. It refreshes after every command and when the window
   regains focus.
+- **Branch switcher:** click the branch name to search every branch, including ones that so far
+  exist only on origin (tagged `origin`). Pick one (or use ↑/↓ and Enter) and `git switch` runs in
+  the terminal; an origin-only branch becomes a local branch that tracks it. With uncommitted
+  changes you first choose between stashing them and taking them along.
 - **Recipe buttons:** click one, fill in the form, check the command preview, press Run. Steps
   run one at a time; the first failing step stops the recipe and the panel shows which one and
   its exit code. Stop (or Ctrl+C) cancels.
@@ -61,6 +65,7 @@ On Linux only the `.AppImage` updates itself; with the `.deb`, install the new o
 | Delete branch | `switch` to another branch, `branch -d` (refuses unmerged branches), optionally `push origin --delete` + `fetch --prune` (only if the branch is merged into the one you switched to) |
 | Merge into… | merge the current branch into dev / staging / prod (`pull --ff-only`, optional `--no-ff`), push, and always return to your branch |
 | Sync with main | `fetch`, then `rebase` or `merge` the default branch from origin |
+| Switch branch | `git switch` (what the branch switcher runs) |
 | Stash & switch | stash everything (incl. untracked), switch, optionally pop only that stash |
 | Version bump + tag + push | update package.json / Cargo.toml / tauri.conf.json (+ lock files), one `chore: release vX.Y.Z` commit, annotated tag, `push --follow-tags` |
 | Abort merge/rebase & go back | abort whatever is in progress and return to the previous branch |

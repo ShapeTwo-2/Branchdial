@@ -6,6 +6,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import type {
+  BranchEntry,
   GitInfo,
   InputValues,
   Plan,
@@ -49,6 +50,11 @@ export function statusRefresh(): Promise<void> {
 
 export function gitBranches(): Promise<string[]> {
   return invoke<string[]>("git_branches");
+}
+
+/** Local branches, then those only on origin, for the branch switcher. */
+export function gitBranchList(): Promise<BranchEntry[]> {
+  return invoke<BranchEntry[]>("git_branch_list");
 }
 
 export function recipePlan(

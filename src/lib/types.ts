@@ -130,6 +130,12 @@ export interface Plan {
 }
 
 /** Answers from the dialog that the backend re-checks before running. */
+export interface BranchEntry {
+  name: string;
+  /** Only on origin so far; switching creates the local tracking branch. */
+  remoteOnly: boolean;
+}
+
 export interface RunChoices {
   staged: string[] | null;
   stashFirst: boolean;
