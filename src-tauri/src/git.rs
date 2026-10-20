@@ -71,17 +71,66 @@ pub fn install() -> Option<&'static GitInstall> {
 /// Runs `git <args>` in `cwd`; returns trimmed stdout on exit code 0.
 /// None if git is missing or the command fails.
 pub fn git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let out = command(&install()?.program).args(args).current_dir(cwd).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&out.stdout).trim_end_matches(['\r', '\n']).to_string())
+    let out = git_raw(cwd, args)?;
+    Some(String::from_utf8_lossy(&out).trim_end_matches(['\r', '\n']).to_string())
 }
 
 /// Like [`git`] but returns raw stdout (for `-z` output).
 pub fn git_raw(cwd: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let out = command(&install()?.program).args(args).current_dir(cwd).output().ok()?;
+    let program = &install()?.program;
+    let out = command(program).args(hardening(program, cwd, args)).args(args).current_dir(cwd).output().ok()?;
     out.status.success().then_some(out.stdout)
+}
+
+/// `-c` overrides for Branchdial's own background queries, which run whenever the
+/// terminal enters a folder, including folders the user hasn't vetted (a project
+/// downloaded with its `.git`). A repo's config can name programs that git runs
+/// during `status`: an fsmonitor hook and clean/process filters. Those are turned
+/// off here; commands the user runs in the terminal are unaffected. Filters from
+/// the user's own (global/system) config, like Git LFS, keep working.
+fn hardening(program: &Path, cwd: &Path, args: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"].map(String::from).into();
+    // Only commands that read file contents through the index apply filters.
+    if !args.iter().any(|a| matches!(*a, "status" | "diff")) {
+        return out;
+    }
+    for name in repo_filter_names(program, cwd) {
+        for key in ["clean", "smudge", "process"] {
+            out.extend(["-c".to_string(), format!("filter.{name}.{key}=")]);
+        }
+        out.extend(["-c".to_string(), format!("filter.{name}.required=false")]);
+    }
+    out
+}
+
+/// Filter drivers defined by the repo itself (local/worktree config, includes
+/// followed). Reading config never runs anything. Without `--show-scope`
+/// (git < 2.26) every defined filter is treated as the repo's.
+fn repo_filter_names(program: &Path, cwd: &Path) -> Vec<String> {
+    // Exit code 1 just means "no matching keys".
+    let read = |args: &[&str]| {
+        let out = command(program).args(args).current_dir(cwd).output().ok()?;
+        matches!(out.status.code(), Some(0 | 1)).then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let (text, scoped) = match read(&["config", "--includes", "--show-scope", "--get-regexp", r"^filter\."]) {
+        Some(t) => (t, true),
+        None => (read(&["config", "--includes", "--get-regexp", r"^filter\."]).unwrap_or_default(), false),
+    };
+    let mut names: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        if scoped && !matches!(parts.next(), Some("local" | "worktree")) {
+            continue;
+        }
+        // filter.<name>.<key>; the name itself may contain dots.
+        let Some(key) = parts.next().and_then(|k| k.strip_prefix("filter.")) else { continue };
+        if let Some((name, _)) = key.rsplit_once('.') {
+            if !names.iter().any(|n| n == name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
 }
 
 /// Install hint for the current OS, shown when git is missing.
@@ -137,7 +186,7 @@ pub struct ChangedFile {
 
 /// Uncommitted changes in the repo (staged, unstaged, untracked; ignored files excluded).
 pub fn changed_files(root: &Path) -> Vec<ChangedFile> {
-    let Some(out) = git_raw(root, &["--no-optional-locks", "status", "--porcelain=v2", "-z"]) else { return vec![] };
+    let Some(out) = git_raw(root, &["--no-optional-locks", "status", "--porcelain=v2", "--ignore-submodules=dirty", "-z"]) else { return vec![] };
     let mut files = vec![];
     let mut fields = out.split(|b| *b == 0).map(|f| String::from_utf8_lossy(f).into_owned());
     while let Some(line) = fields.next() {
@@ -462,5 +511,39 @@ mod tests {
         let status = Command::new("git").args(["merge", "a"]).current_dir(&r.work).output().unwrap().status;
         assert!(!status.success());
         assert_eq!(operation_in_progress(&r.work), Some(Operation::Merge));
+    }
+
+    /// A downloaded repo's own config names programs git would run during `status`
+    /// (fsmonitor hook, clean/process filters, defined directly and via an include).
+    /// Branchdial's background queries must not run any of them.
+    #[test]
+    fn background_queries_never_run_repo_configured_programs() {
+        let r = TempRepo::new("trap");
+        let marker = r.work.parent().unwrap().join("pwned");
+        let m = marker.to_string_lossy().replace('\\', "/");
+        let append = |what: &str| format!("echo {what} >> '{m}'");
+        r.git(&["config", "core.fsmonitor", &format!("{}; false", append("fsmonitor"))]);
+        r.git(&["config", "filter.evil.clean", &format!("{}; cat", append("clean"))]);
+        r.git(&["config", "filter.evil.process", &format!("{}; false", append("process"))]);
+        // A second driver hidden in an included file.
+        let extra = r.work.parent().unwrap().join("extra.cfg");
+        std::fs::write(&extra, format!("[filter \"sneaky\"]\n\tclean = {}; cat\n", append("included"))).unwrap();
+        r.git(&["config", "include.path", &extra.to_string_lossy().replace('\\', "/")]);
+        std::fs::write(r.work.join(".git/info/attributes"), "*.txt filter=evil\n*.md filter=sneaky\n").unwrap();
+        // Same size, new mtime: git has to re-read (and filter) the contents.
+        std::fs::write(r.work.join("README.md"), "hellO\n").unwrap();
+        std::fs::write(r.work.join("a.txt"), "x").unwrap();
+
+        let _ = crate::status::read(&r.work);
+        let _ = changed_files(&r.work);
+        let _ = context(&r.work);
+        let _ = branch_list(&r.work);
+        let _ = conflicted_files(&r.work);
+        assert!(!marker.exists(), "ran: {}", std::fs::read_to_string(&marker).unwrap_or_default());
+        assert_eq!(changed_files(&r.work).len(), 2, "status still works");
+
+        // Control: plain git really does run them, so the assertion above means something.
+        let _ = Command::new("git").args(["status", "--porcelain"]).current_dir(&r.work).output();
+        assert!(marker.exists(), "the trap should fire without Branchdial's overrides");
     }
 }
