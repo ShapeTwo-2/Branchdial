@@ -464,7 +464,20 @@ mod builtin_tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
         };
-        write("package.json", "{\n  \"name\": \"demo\",\n  \"version\": \"0.1.0\"\n}\n");
+        // Lifecycle scripts a downloaded repo could ship: the bump must not run them.
+        write(
+            "package.json",
+            r#"{
+  "name": "demo",
+  "version": "0.1.0",
+  "scripts": {
+    "preversion": "node -e \"require('fs').writeFileSync('pwned-pre','x')\"",
+    "version": "node -e \"require('fs').writeFileSync('pwned-version','x')\"",
+    "postversion": "node -e \"require('fs').writeFileSync('pwned-post','x')\""
+  }
+}
+"#,
+        );
         write("src-tauri/Cargo.toml", "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n");
         write("src-tauri/Cargo.lock", "[[package]]\nname = \"demo\"\nversion = \"0.1.0\"\n");
         write("src-tauri/tauri.conf.json", "{\n  \"version\": \"0.1.0\"\n}\n");
@@ -489,6 +502,9 @@ mod builtin_tests {
             assert!(body.contains("0.2.0") && !body.contains("0.1.0"), "{f}: {body}");
         }
         assert_eq!(show(&["status", "--porcelain"]), " M unrelated.txt");
+        for f in ["pwned-pre", "pwned-version", "pwned-post"] {
+            assert!(!r.work.join(f).exists(), "npm ran the repo's {f} script");
+        }
     }
 
     #[test]
