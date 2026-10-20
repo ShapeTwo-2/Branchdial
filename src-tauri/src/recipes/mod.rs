@@ -169,11 +169,19 @@ pub async fn recipe_run(
     if (recipe.confirm || !p.risks.is_empty()) && !choices.confirmed {
         return Err("This recipe needs confirmation before it runs.".into());
     }
+    let mut temp_files = vec![];
     if let Some((path, contents)) = &p.pathspec_file {
-        std::fs::write(path, contents).map_err(|e| format!("Could not write {}: {e}", path.display()))?;
+        plan::write_pathspec_file(path, contents).map_err(|e| format!("Could not write {}: {e}", path.display()))?;
+        temp_files.push(path.clone());
     }
-    let meta = RunMeta { name: recipe.name.clone(), start_branch: ctx.current_branch.clone() };
-    crate::runner::start_in_app(&app, &state, meta, p.steps)
+    let meta = RunMeta { name: recipe.name.clone(), start_branch: ctx.current_branch.clone(), temp_files };
+    let started = crate::runner::start_in_app(&app, &state, meta, p.steps);
+    if started.is_err() {
+        if let Some((path, _)) = &p.pathspec_file {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    started
 }
 
 /// Runs every built-in recipe's real commands with bash in throwaway repos

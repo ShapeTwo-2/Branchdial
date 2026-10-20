@@ -167,7 +167,6 @@ pub struct RepoContext {
     pub current_branch: Option<String>,
     pub default_branch: Option<String>,
     pub operation: Option<Operation>,
-    pub git_dir: Option<PathBuf>,
     /// Uncommitted changes, from `git status`.
     pub changes: Vec<ChangedFile>,
     /// Branch patterns that need confirmation before pushing (filled in by the caller).
@@ -267,7 +266,6 @@ pub fn context(cwd: &Path) -> RepoContext {
     let current_branch = git(&root, &["symbolic-ref", "--short", "-q", "HEAD"]).filter(|b| !b.is_empty());
     let default_branch = default_branch(&root);
     let operation = operation_in_progress(&root);
-    let git_dir = git(&root, &["rev-parse", "--absolute-git-dir"]).map(PathBuf::from);
     let changes = changed_files(&root);
     RepoContext {
         cwd: Some(cwd.to_path_buf()),
@@ -275,7 +273,6 @@ pub fn context(cwd: &Path) -> RepoContext {
         current_branch,
         default_branch,
         operation,
-        git_dir,
         changes,
         protected: vec![],
     }
