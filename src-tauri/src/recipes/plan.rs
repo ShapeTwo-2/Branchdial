@@ -449,6 +449,17 @@ pub fn typeable(s: &str) -> bool {
     !s.chars().any(char::is_control)
 }
 
+/// Invisible or direction-changing characters (Unicode "format" characters such as
+/// U+202E RIGHT-TO-LEFT OVERRIDE or U+200B ZERO WIDTH SPACE, plus line/paragraph
+/// separators). They make text display differently from what it is ("Trojan
+/// Source"), so a preview could look harmless. Mirrors `HIDDEN` in the frontend.
+pub fn is_hidden_char(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{115F}' | '\u{1160}' | '\u{17B4}' | '\u{17B5}' | '\u{180B}'..='\u{180F}'
+        | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{3164}' | '\u{FE00}'..='\u{FE0F}'
+        | '\u{FEFF}' | '\u{FFA0}' | '\u{FFF0}'..='\u{FFFB}' | '\u{E0000}'..='\u{E0FFF}')
+}
+
 /// Ok(value) or Err(message). Optional fields may be empty.
 fn check_text(kind: InputKind, text: &str, required: bool, options: &[String]) -> Result<String, String> {
     if text.trim().is_empty() {
@@ -456,6 +467,9 @@ fn check_text(kind: InputKind, text: &str, required: bool, options: &[String]) -
     }
     if text.chars().any(|c| c.is_control()) {
         return Err("Must be a single line without control characters".into());
+    }
+    if let Some(c) = text.chars().find(|&c| is_hidden_char(c)) {
+        return Err(format!("Contains an invisible or text-direction character (U+{:04X}); retype it instead of pasting", c as u32));
     }
     match kind {
         InputKind::Branch => check_branch_name(text).map(|_| text.to_string()),

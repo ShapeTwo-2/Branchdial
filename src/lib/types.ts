@@ -80,6 +80,8 @@ export interface LoadError {
 }
 
 export interface PendingTrust {
+  /** The version trusted before, when the file changed (null if it wasn't kept). */
+  previous: string | null;
   file: string;
   content: string;
   hash: string;
