@@ -161,7 +161,12 @@ export default function App() {
     const values = { branch };
     try {
       const p = await recipePlan(SWITCH_RECIPE, values, { staged: null, stashFirst: false });
-      if (p.errors.length === 0 && !p.dirtySwitch && p.risks.length === 0 && !switchRecipe.confirm) {
+      // Skipping the preview is only for Branchdial's own one-step `git switch`. A
+      // .branchdial.yml (or the global file) can replace this recipe by id; then its
+      // steps are shown in the dialog like any other recipe before they run.
+      const ownSwitch =
+        switchRecipe.source === "builtin" && p.steps.length === 1 && p.steps[0].command.startsWith("git switch ");
+      if (ownSwitch && p.errors.length === 0 && !p.dirtySwitch && p.risks.length === 0 && !switchRecipe.confirm) {
         await recipeRun(SWITCH_RECIPE, values, p.steps.map((s) => s.command), {
           staged: null,
           stashFirst: false,
