@@ -4,8 +4,6 @@ ZDOTDIR=$__rb_user_zdotdir
 __rb_user_zdotdir=$ZDOTDIR
 
 # Reports the last exit code and cwd via an invisible escape sequence (OSC 6973).
-typeset -g __rb_nonce="$BRANCHDIAL_NONCE"
-unset BRANCHDIAL_NONCE
 __rb_precmd() {
   local ec=$?
   printf '\033]6973;P;%s;%s;%s\007' "$__rb_nonce" "$ec" "$PWD"

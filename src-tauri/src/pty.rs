@@ -11,7 +11,6 @@ use crate::{config, runner, shell};
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use std::ffi::OsString;
-use std::hash::{BuildHasher, Hasher};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -166,15 +165,12 @@ fn dir_from_args(args: impl Iterator<Item = OsString>) -> Option<PathBuf> {
     None
 }
 
-/// Unpredictable enough that program output won't match it by accident.
-fn new_nonce() -> String {
-    let rs = std::collections::hash_map::RandomState::new();
-    let mut h = rs.build_hasher();
-    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
-    h.write_u32(std::process::id());
-    let a = h.finish();
-    h.write_u64(a);
-    format!("{a:016x}{:016x}", h.finish())
+/// 128 bits from the OS's secure random source: program output can't guess it,
+/// so it can't fake a "command finished" marker.
+pub(crate) fn new_nonce() -> String {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).expect("the OS random source is unavailable");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Starts (or restarts) the shell. Any existing session is killed first.
