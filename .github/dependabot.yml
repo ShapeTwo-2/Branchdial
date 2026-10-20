@@ -1,0 +1,29 @@
+# Weekly dependency update PRs, plus security updates as soon as an advisory lands
+# (enable "Dependabot security updates" in the repo's Code security settings).
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    schedule:
+      interval: weekly
+    groups:
+      tauri:
+        patterns: ["tauri", "tauri-*"]
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      tauri:
+        patterns: ["@tauri-apps/*"]
+      dev-tooling:
+        dependency-type: development
+    open-pull-requests-limit: 10
+
+  # Keeps the SHA-pinned actions in .github/workflows current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
