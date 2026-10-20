@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -48,10 +48,22 @@ interface Props {
   focusRef: React.MutableRefObject<() => void>;
 }
 
+/** Only web links are acted on; `file:`, `javascript:` and the like never are. */
+function webUrl(uri: string): string | null {
+  try {
+    const u = new URL(uri);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.href : null;
+  } catch {
+    return null;
+  }
+}
+
 export function Terminal({ onSpawned, focusRef }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const onSpawnedRef = useRef(onSpawned);
   onSpawnedRef.current = onSpawned;
+  // Hyperlinks (OSC 8) show their real target, whatever text the program printed.
+  const [link, setLink] = useState<{ url: string; note: string } | null>(null);
 
   useEffect(() => {
     const host = hostRef.current!;
@@ -62,6 +74,20 @@ export function Terminal({ onSpawned, focusRef }: Props) {
       scrollback: 10000,
       theme: THEME,
       allowProposedApi: false,
+      // Replaces xterm's default, which shows a confirm() with the program's text and
+      // tries window.open(). Here a link never opens anything: hovering shows the
+      // real URL, clicking copies a web URL so the user can paste it in a browser.
+      linkHandler: {
+        allowNonHttpProtocols: false,
+        hover: (_e, uri) => setLink({ url: uri, note: webUrl(uri) ? "Click to copy" : "Not a web link" }),
+        leave: () => setLink(null),
+        activate: (_e, uri) => {
+          const url = webUrl(uri);
+          if (!url) return;
+          void copyText(url);
+          setLink({ url, note: "Copied" });
+        },
+      },
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -145,5 +171,15 @@ export function Terminal({ onSpawned, focusRef }: Props) {
     };
   }, []);
 
-  return <div className="terminal-host" ref={hostRef} />;
+  return (
+    <div className="terminal-wrap">
+      <div className="terminal-host" ref={hostRef} />
+      {link && (
+        <div className="link-preview" role="status">
+          <span className="link-url selectable">{link.url}</span>
+          <span className="muted">{link.note}</span>
+        </div>
+      )}
+    </div>
+  );
 }
