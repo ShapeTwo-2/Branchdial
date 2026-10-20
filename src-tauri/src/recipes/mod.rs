@@ -327,6 +327,70 @@ mod builtin_tests {
         assert!(r.work.join("main3.txt").exists());
     }
 
+    /// Hostile values through a real recipe and a real shell: every one must arrive
+    /// literally, and nothing may execute (a "pwned" file appearing = injection).
+    #[test]
+    fn hostile_branch_names_messages_and_file_names_stay_literal() {
+        let r = TempRepo::new("inject");
+        let pwned = || {
+            std::fs::read_dir(&r.work).unwrap().chain(std::fs::read_dir(r.work.parent().unwrap()).unwrap())
+                .filter_map(|e| e.ok())
+                .any(|e| e.file_name().to_string_lossy().starts_with("pwned"))
+        };
+        // Legal git branch names that are shell syntax.
+        let mut branches = vec!["feat/$(touch${IFS}pwned1)", "feat/`touch${IFS}pwned2`", "feat/a'b", "feat/x;touch${IFS}pwned3", "feat/$HOME&"];
+        if cfg!(unix) {
+            branches.push("feat/x|touch${IFS}pwned8"); // `|` can't be in a Windows file name (loose refs are files)
+        }
+        let msg = "it's \"quoted\" `touch pwned4` $(touch pwned5) ${HOME} \\ !! 'end";
+        for (i, branch) in branches.iter().enumerate() {
+            std::fs::write(r.work.join(format!("f{i}.txt")), "x").unwrap();
+            let res = run(&r, "bcp", &[("branch", json!(branch)), ("msg", json!(msg))]);
+            assert!(all_ok(&res), "{branch}: {res:?}");
+            assert_eq!(head(&r), *branch);
+            assert_eq!(git::git(&r.origin, &["log", "-1", "--format=%s", branch]).unwrap(), msg);
+        }
+        assert!(!pwned(), "a branch name or message was executed");
+
+        // File names with spaces, quotes, a leading "-", unicode and shell syntax,
+        // staged through the picker (.env stays unchecked, so names are typed inline).
+        let mut names = vec!["has space.txt", "quo'te.txt", "-leading.txt", "ünïcødé ✓.txt", "$(touch pwned6).txt", "`touch pwned7`.txt"];
+        if cfg!(unix) {
+            names.push("dq\"uote.txt");
+        }
+        for n in &names {
+            std::fs::write(r.work.join(n), "x").unwrap();
+        }
+        std::fs::write(r.work.join(".env"), "SECRET=1").unwrap();
+        let res = run(&r, "bcp", &[("branch", json!("feat/files")), ("msg", json!("files"))]);
+        assert!(all_ok(&res), "{res:?}");
+        assert!(res[1].0.starts_with("git add -- "), "picker rewrote the add step: {}", res[1].0);
+        let committed = git::git(&r.work, &["-c", "core.quotePath=false", "show", "--name-only", "--format="]).unwrap();
+        let mut got: Vec<&str> = committed.lines().collect();
+        got.sort();
+        let mut want = names.clone();
+        want.sort();
+        assert_eq!(got, want, ".env must not be committed; every other name exactly once");
+        assert!(!pwned(), "a file name was executed");
+    }
+
+    /// Values that must be refused before anything runs.
+    #[test]
+    fn refuses_option_like_and_multiline_values() {
+        let r = TempRepo::new("refuse");
+        let ctx = git::context(&r.work);
+        let bcp = loader::load(None).recipes.into_iter().find(|x| x.id == "bcp").unwrap();
+        let errors = |branch: &str, msg: &str| {
+            let values = HashMap::from([("branch".to_string(), json!(branch)), ("msg".to_string(), json!(msg))]);
+            plan::plan(&bcp, &values, &ctx).errors.into_iter().filter_map(|e| e.input).collect::<Vec<_>>()
+        };
+        assert_eq!(errors("-f", "ok"), ["branch"], "leading - would be read as an option");
+        assert_eq!(errors("--force", "ok"), ["branch"]);
+        for bad_msg in ["two\nlines", "cr\rhere", "esc \x1b[31m", "ctrl-u \x15", "tab\there", "nul\0", "c1 \u{9b}"] {
+            assert_eq!(errors("ok", bad_msg), ["msg"], "{bad_msg:?}");
+        }
+    }
+
     #[test]
     fn switch_branch_local_and_origin_only() {
         let r = TempRepo::new("switch");

