@@ -93,7 +93,7 @@ pub async fn repo_trust(state: State<'_, PtyState>, hash: String) -> Result<(), 
     if trust::hash(&text) != hash {
         return Err(format!("{} changed while you were reviewing it. Review it again.", loader::REPO_FILE));
     }
-    trust::TrustStore::user().ok_or("No home directory to save trust in.")?.trust(&root, &hash)
+    trust::TrustStore::user().ok_or("No home directory to save trust in.")?.trust(&root, &text)
 }
 
 /// Renders the commands for a preview. Always succeeds unless the recipe is gone;
@@ -397,6 +397,11 @@ mod builtin_tests {
         for bad_msg in ["two\nlines", "cr\rhere", "esc \x1b[31m", "ctrl-u \x15", "tab\there", "nul\0", "c1 \u{9b}"] {
             assert_eq!(errors("ok", bad_msg), ["msg"], "{bad_msg:?}");
         }
+        // Text that displays differently from what it is (Trojan Source).
+        for hidden in ["fix \u{202E}txt.exe", "zero\u{200B}width", "bom\u{FEFF}", "isolate \u{2066}x\u{2069}", "line\u{2028}sep", "tag \u{E0041}"] {
+            assert_eq!(errors("ok", hidden), ["msg"], "{hidden:?}");
+        }
+        assert_eq!(errors("ok", "ünïcødé ✓ 日本語 émoji 🎉"), Vec::<String>::new(), "ordinary unicode is fine");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { conflictAbort, conflictContinue, conflictFiles, recipeCancel } from "../lib/ipc";
 import type { PlannedStep, RepoStatus, RunDone, StepState } from "../lib/types";
+import { Reveal } from "../lib/hidden";
 
 export interface RunView {
   name: string;
@@ -73,7 +74,9 @@ export function RunPanel({ run, status, onDismiss }: Props) {
         {run.steps.map((s, i) => (
           <li key={i} className={`step step-${run.states[i]}`}>
             <span className="step-icon">{ICON[run.states[i]]}</span>
-            <code>{s.command}</code>
+            <code>
+              <Reveal text={s.command} />
+            </code>
             {run.states[i] === "failed" && run.exitCodes[i] !== null && (
               <span className="step-note">exit {run.exitCodes[i]}</span>
             )}
