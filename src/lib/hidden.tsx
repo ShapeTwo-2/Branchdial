@@ -5,8 +5,13 @@
 
 import type { ReactNode } from "react";
 
-const HIDDEN =
-  /[­͏؜ᅟᅠ឴឵᠋-᠏​-‏ -‮⁠-⁯ㅤ︀-️﻿ﾠ￰-￻\u{E0000}-\u{E0FFF}]/gu;
+// Built from a string: written as a regex literal, the line/paragraph separator escapes
+// ended up as real line breaks (which end a literal). Here they reach the regex engine as text.
+const HIDDEN = new RegExp(
+  "[\\u00AD\\u034F\\u061C\\u115F\\u1160\\u17B4\\u17B5\\u180B-\\u180F\\u200B-\\u200F\\u2028-\\u202E" +
+    "\\u2060-\\u206F\\u3164\\uFE00-\\uFE0F\\uFEFF\\uFFA0\\uFFF0-\\uFFFB\\u{E0000}-\\u{E0FFF}]",
+  "gu",
+);
 
 export function hasHidden(text: string): boolean {
   HIDDEN.lastIndex = 0;
