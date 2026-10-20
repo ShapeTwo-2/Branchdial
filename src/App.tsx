@@ -15,13 +15,18 @@ import {
   onRunDone,
   onRunStarted,
   onRunStep,
+  recipePlan,
+  recipeRun,
   recipesList,
   statusRefresh,
   updateCheck,
   updatesAutoCheck,
   type Update,
 } from "./lib/ipc";
-import type { GitInfo, Recipe, RecipeList, RepoStatus, SpawnInfo } from "./lib/types";
+import type { GitInfo, InputValues, Recipe, RecipeList, RepoStatus, SpawnInfo } from "./lib/types";
+
+/** The built-in recipe the branch dropdown runs. */
+const SWITCH_RECIPE = "switch-branch";
 
 const SKIPPED_KEY = "branchdial.skippedVersion";
 
@@ -42,7 +47,7 @@ export default function App() {
   const [list, setList] = useState<RecipeList | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [run, setRun] = useState<RunView | null>(null);
-  const [openRecipe, setOpenRecipe] = useState<Recipe | null>(null);
+  const [openRecipe, setOpenRecipe] = useState<{ recipe: Recipe; initial?: InputValues } | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [trustOpen, setTrustOpen] = useState(false);
   // null: closed; "check": the user asked to check now; otherwise found on startup.
@@ -147,6 +152,31 @@ export default function App() {
     focusTerminal.current();
   }, []);
 
+  // Branch dropdown: a clean switch runs straight away in the terminal. Anything that
+  // needs a decision (uncommitted changes, a confirmation, an error) opens the recipe
+  // dialog with the branch filled in.
+  const switchRecipe = list?.recipes.find((r) => r.id === SWITCH_RECIPE) ?? null;
+  const switchBranch = async (branch: string) => {
+    if (!switchRecipe) return;
+    const values = { branch };
+    try {
+      const p = await recipePlan(SWITCH_RECIPE, values, { staged: null, stashFirst: false });
+      if (p.errors.length === 0 && !p.dirtySwitch && p.risks.length === 0 && !switchRecipe.confirm) {
+        await recipeRun(SWITCH_RECIPE, values, p.steps.map((s) => s.command), {
+          staged: null,
+          stashFirst: false,
+          allowDirtySwitch: false,
+          confirmed: false,
+        });
+        focusTerminal.current();
+        return;
+      }
+    } catch {
+      // The dialog re-plans and shows what went wrong.
+    }
+    setOpenRecipe({ recipe: switchRecipe, initial: values });
+  };
+
   const closeDialog = () => {
     setOpenRecipe(null);
     setAddOpen(false);
@@ -158,12 +188,19 @@ export default function App() {
   return (
     <div className="app">
       <Sidebar
-        statusBar={<StatusBar git={git} status={status} onRefresh={() => void statusRefresh()} />}
+        statusBar={
+          <StatusBar
+            git={git}
+            status={status}
+            onRefresh={() => void statusRefresh()}
+            switcher={switchRecipe && { disabledReason, onSwitch: (b) => void switchBranch(b) }}
+          />
+        }
         list={list}
         listError={listError}
         disabledReason={disabledReason}
         onRefresh={refresh}
-        onOpen={setOpenRecipe}
+        onOpen={(recipe) => setOpenRecipe({ recipe })}
         onAdd={() => setAddOpen(true)}
         onReviewTrust={() => setTrustOpen(true)}
         onCheckUpdates={() => setUpdateOpen("check")}
@@ -181,7 +218,14 @@ export default function App() {
           />
         )}
       </main>
-      {openRecipe && <RecipeDialog key={openRecipe.id} recipe={openRecipe} onClose={closeDialog} />}
+      {openRecipe && (
+        <RecipeDialog
+          key={openRecipe.recipe.id}
+          recipe={openRecipe.recipe}
+          initial={openRecipe.initial}
+          onClose={closeDialog}
+        />
+      )}
       {trustOpen && list?.pendingTrust && (
         <TrustDialog
           pending={list.pendingTrust}

@@ -4,6 +4,8 @@ import type { InputDef, InputValues, Plan, Recipe } from "../lib/types";
 
 interface Props {
   recipe: Recipe;
+  /** Pre-filled answers (e.g. the branch picked in the branch dropdown). */
+  initial?: InputValues;
   onClose: () => void;
 }
 
@@ -30,8 +32,8 @@ const STATUS_LABEL: Record<string, string> = {
   "??": "new",
 };
 
-export function RecipeDialog({ recipe, onClose }: Props) {
-  const [values, setValues] = useState<InputValues>(() => initialValues(recipe.inputs));
+export function RecipeDialog({ recipe, initial, onClose }: Props) {
+  const [values, setValues] = useState<InputValues>(() => ({ ...initialValues(recipe.inputs), ...initial }));
   // Files picked for `git add -A`; null until the first plan offers a picker.
   const [staged, setStaged] = useState<string[] | null>(null);
   const [dirtyChoice, setDirtyChoice] = useState<DirtyChoice>("stash");

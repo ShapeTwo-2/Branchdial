@@ -118,6 +118,13 @@ pub async fn git_branches(state: State<'_, PtyState>) -> Result<Vec<String>, Str
     Ok(root.map(|r| git::branch_names(&r)).unwrap_or_default())
 }
 
+/// Branches for the switcher under the branch name, with which ones exist only on origin.
+#[tauri::command]
+pub async fn git_branch_list(state: State<'_, PtyState>) -> Result<Vec<git::BranchEntry>, String> {
+    let root = state.cwd().as_deref().and_then(git::repo_root);
+    Ok(root.map(|r| git::branch_list(&r)).unwrap_or_default())
+}
+
 /// The user's answers in the dialog, checked again here so the frontend
 /// can't skip a confirmation.
 #[derive(serde::Deserialize, Default)]
@@ -318,6 +325,28 @@ mod builtin_tests {
         r.git(&["checkout", "-q", "feat/s"]);
         assert!(all_ok(&run(&r, "sync-main", &[("strategy", json!("merge"))])));
         assert!(r.work.join("main3.txt").exists());
+    }
+
+    #[test]
+    fn switch_branch_local_and_origin_only() {
+        let r = TempRepo::new("switch");
+        r.git(&["branch", "local-one"]);
+        // On origin only: pushing a new name also creates origin/<name> here.
+        r.git(&["push", "-q", "origin", "main:team/feature"]);
+        let list = git::branch_list(&r.work);
+        let entry = |n: &str| list.iter().find(|b| b.name == n).cloned();
+        assert_eq!(entry("local-one").map(|b| b.remote_only), Some(false));
+        assert_eq!(entry("team/feature").map(|b| b.remote_only), Some(true));
+        assert_eq!(list.iter().filter(|b| b.name == "main").count(), 1, "main is local and on origin: listed once");
+
+        assert!(all_ok(&run(&r, "switch-branch", &[("branch", json!("local-one"))])));
+        assert_eq!(head(&r), "local-one");
+
+        // Switching to an origin-only branch creates the local branch, tracking origin.
+        assert!(all_ok(&run(&r, "switch-branch", &[("branch", json!("team/feature"))])));
+        assert_eq!(head(&r), "team/feature");
+        assert_eq!(git::git(&r.work, &["rev-parse", "--abbrev-ref", "@{upstream}"]).unwrap(), "origin/team/feature");
+        assert!(!git::branch_list(&r.work).iter().any(|b| b.remote_only));
     }
 
     #[test]

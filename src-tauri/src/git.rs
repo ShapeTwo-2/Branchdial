@@ -242,20 +242,34 @@ pub fn remote_branch_exists(root: &Path, name: &str) -> bool {
 
 /// Local branches, then origin's branches that have no local counterpart.
 pub fn branch_names(root: &Path) -> Vec<String> {
-    let mut names: Vec<String> = git(root, &["branch", "--format=%(refname:short)"])
-        .map(|s| s.lines().map(String::from).collect())
+    branch_list(root).into_iter().map(|b| b.name).collect()
+}
+
+/// A branch for the branch switcher.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchEntry {
+    pub name: String,
+    /// Only on origin so far; `git switch <name>` creates the local tracking branch.
+    pub remote_only: bool,
+}
+
+/// Local branches, then branches that exist only on origin.
+pub fn branch_list(root: &Path) -> Vec<BranchEntry> {
+    let mut list: Vec<BranchEntry> = git(root, &["branch", "--format=%(refname:short)"])
+        .map(|s| s.lines().map(|n| BranchEntry { name: n.to_string(), remote_only: false }).collect())
         .unwrap_or_default();
     if let Some(remote) = git(root, &["branch", "-r", "--format=%(refname:short)"]) {
         for r in remote.lines() {
             if let Some(n) = r.strip_prefix("origin/") {
-                if n != "HEAD" && !names.iter().any(|x| x == n) {
-                    names.push(n.to_string());
+                if n != "HEAD" && !list.iter().any(|b| b.name == n) {
+                    list.push(BranchEntry { name: n.to_string(), remote_only: true });
                 }
             }
         }
     }
-    names.retain(|n| !n.is_empty() && !n.starts_with('('));
-    names
+    list.retain(|b| !b.name.is_empty() && !b.name.starts_with('('));
+    list
 }
 
 /// origin/HEAD if the remote advertises it, else the first of main/master that exists locally.

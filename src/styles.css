@@ -134,6 +134,110 @@ pre {
   color: var(--accent);
 }
 
+/* ---------- branch switcher ---------- */
+
+.branch-switcher {
+  position: relative;
+}
+
+.branch-btn {
+  width: calc(100% + 12px);
+  margin: -2px -6px;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.branch-btn:hover,
+.branch-btn.open {
+  background: var(--panel-border);
+}
+
+.branch-caret {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.branch-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: -8px;
+  right: -8px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.branch-search {
+  padding: 6px 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.branch-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.branch-options {
+  max-height: 320px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.branch-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  font-family: "Cascadia Mono", "Cascadia Code", Consolas, Menlo, monospace;
+  cursor: pointer;
+}
+
+.branch-option.active {
+  background: var(--panel-border);
+}
+
+.branch-option.current {
+  color: var(--accent);
+  cursor: default;
+}
+
+.branch-option.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.branch-option-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.branch-menu-note {
+  padding: 5px 8px;
+}
+
 .status-row {
   overflow: hidden;
   text-overflow: ellipsis;
