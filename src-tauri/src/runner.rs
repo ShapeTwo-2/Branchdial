@@ -614,6 +614,127 @@ mod tests {
         }
     }
 
+    /// A real bash/zsh with Branchdial's integration in a PTY, as the app starts it.
+    struct RealShell {
+        child: Box<dyn portable_pty::Child + Send + Sync>,
+        // Must outlive the shell: on Windows, dropping it closes the pseudo-console.
+        _master: Box<dyn portable_pty::MasterPty + Send>,
+        writer: Arc<Mutex<PipeSink>>,
+        prompts: mpsc::Receiver<Prompt>,
+    }
+
+    impl RealShell {
+        /// None on a machine whose default shell isn't bash/zsh. With `home`, the
+        /// shell's startup files come from there instead of the real home.
+        fn start(cwd: &std::path::Path, home: Option<&std::path::Path>) -> Option<Self> {
+            let spec = crate::shell::resolve(&crate::config::Config::default()).unwrap();
+            if spec.kind != crate::shell::Kind::Bash && spec.kind != crate::shell::Kind::Zsh {
+                return None;
+            }
+            let nonce = crate::pty::new_nonce();
+            let launch = crate::shell::prepare_launch(&spec, &nonce);
+            assert!(launch.integration);
+            let pair = native_pty_system()
+                .openpty(PtySize { rows: 30, cols: 200, pixel_width: 0, pixel_height: 0 })
+                .unwrap();
+            let mut cmd = CommandBuilder::new(&spec.program);
+            cmd.args(&launch.args);
+            cmd.cwd(cwd);
+            cmd.env("TERM", "xterm-256color");
+            for (k, v) in &launch.env {
+                cmd.env(k, v);
+            }
+            if let Some(home) = home {
+                cmd.env("HOME", home);
+                cmd.env("BRANCHDIAL_USER_ZDOTDIR", home);
+            }
+            let child = pair.slave.spawn_command(cmd).unwrap();
+            drop(pair.slave);
+            let mut reader = pair.master.try_clone_reader().unwrap();
+            let writer = Arc::new(Mutex::new(PipeSink(pair.master.take_writer().unwrap())));
+            let (tx, prompts) = mpsc::channel::<Prompt>();
+            let dsr_writer = writer.clone();
+            std::thread::spawn(move || {
+                let mut parser = MarkerParser::new(nonce);
+                let mut buf = [0u8; 8192];
+                while let Ok(n) = reader.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    // Play terminal: answer ConPTY's cursor-position query.
+                    if buf[..n].windows(4).any(|w| w == b"\x1b[6n") {
+                        let _ = dsr_writer.lock().unwrap().send(b"\x1b[1;1R");
+                    }
+                    for seg in parser.feed(&buf[..n]) {
+                        if let Segment::Prompt(p) = seg {
+                            if tx.send(p).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            });
+            Some(Self { child, _master: pair.master, writer, prompts })
+        }
+
+        fn next(&self) -> Prompt {
+            self.prompts.recv_timeout(Duration::from_secs(30)).expect("no prompt marker from the shell")
+        }
+
+        /// Runs `steps` to the end; returns every event.
+        fn run(&self, shell: &mut ShellStatus, st: &mut RunnerState, steps: Vec<PlannedStep>) -> Vec<Event> {
+            let mut all = start(shell, st, &mut *self.writer.lock().unwrap(), meta("real"), steps).unwrap();
+            while st.run.is_some() {
+                let p = self.next();
+                all.extend(handle_prompt(shell, st, &mut *self.writer.lock().unwrap(), p));
+            }
+            all
+        }
+    }
+
+    impl Drop for RealShell {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+        }
+    }
+
+    /// Output can't fake "the command finished": programs never see the nonce
+    /// (not even ones started from the user's startup files), and markers with a
+    /// missing or wrong nonce are ignored, so the real exit code wins.
+    #[test]
+    fn programs_cannot_forge_the_finished_marker() {
+        let repo = TempRepo::new("forge");
+        let home = repo.work.parent().unwrap().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        // Startup files that start a program which records its environment.
+        let dump = "env > \"$HOME/startup-env.txt\"\n";
+        for rc in [".bashrc", ".bash_profile", ".zshrc"] {
+            std::fs::write(home.join(rc), dump).unwrap();
+        }
+        let Some(sh) = RealShell::start(&repo.work, Some(&home)) else { return };
+        let mut shell = ShellStatus { integration: true, ..Default::default() };
+        let mut st = RunnerState::default();
+        let first = sh.next();
+        handle_prompt(&mut shell, &mut st, &mut *sh.writer.lock().unwrap(), first);
+
+        let env_dump = std::fs::read_to_string(home.join("startup-env.txt")).expect("startup file ran");
+        assert!(!env_dump.contains("BRANCHDIAL_NONCE"), "a program started from a startup file saw the nonce");
+
+        // A child program prints "finished with exit 0" markers using every nonce it
+        // could find (none) and a made-up one, then the step really fails.
+        let forge = r#"bash -c 'printf "\033]6973;P;%s;0;/forged\007\033]6973;P;guess;0;/forged\033\\" "$BRANCHDIAL_NONCE$__rb_nonce"'; false"#;
+        let all = sh.run(&mut shell, &mut st, vec![step(forge, false), step("echo typed-too-early", false)]);
+        let d = done(&all).unwrap();
+        assert_eq!(d.status, RunStatus::Failed);
+        assert_eq!(d.failed_step, Some(0), "the forged exit 0 was ignored");
+        assert_eq!(d.exit_code, Some(1));
+        assert!(!shell.cwd.as_ref().unwrap().to_string_lossy().contains("forged"));
+
+        // And no program in the session can read it from its environment.
+        let all = sh.run(&mut shell, &mut st, vec![step("! env | grep -q BRANCHDIAL_NONCE", false)]);
+        assert_eq!(done(&all).unwrap().status, RunStatus::Ok);
+    }
+
     /// The whole loop against a real shell with the real integration script:
     /// a bcp-style recipe in a throwaway repo, pushing to a local bare "origin".
     #[test]
