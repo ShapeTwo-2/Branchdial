@@ -373,8 +373,11 @@ mod builtin_tests {
         let res = run(&r, "bcp", &[("branch", json!("feat/files")), ("msg", json!("files"))]);
         assert!(all_ok(&res), "{res:?}");
         assert!(res[1].0.starts_with("git add -- "), "picker rewrote the add step: {}", res[1].0);
-        let committed = git::git(&r.work, &["-c", "core.quotePath=false", "show", "--name-only", "--format="]).unwrap();
-        let mut got: Vec<&str> = committed.lines().collect();
+        // -z: names exactly as stored. Without it git C-quotes names containing `"` or `\`
+        // (core.quotePath=false only stops quoting non-ASCII), e.g. "dq\"uote.txt".
+        let committed = git::git_raw(&r.work, &["show", "--name-only", "-z", "--format="]).unwrap();
+        let committed = String::from_utf8(committed).unwrap();
+        let mut got: Vec<&str> = committed.split('\0').map(|s| s.trim_start_matches('\n')).filter(|s| !s.is_empty()).collect();
         got.sort();
         let mut want = names.clone();
         want.sort();
