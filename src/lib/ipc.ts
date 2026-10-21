@@ -1,11 +1,13 @@
 // Typed wrappers around every Tauri command and event the frontend uses.
 // Components never call `invoke` / `listen` directly.
 
+import { getVersion } from "@tauri-apps/api/app";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import type {
+  BranchEntry,
   GitInfo,
   InputValues,
   Plan,
@@ -51,6 +53,11 @@ export function gitBranches(): Promise<string[]> {
   return invoke<string[]>("git_branches");
 }
 
+/** Local branches, then those only on origin, for the branch switcher. */
+export function gitBranchList(): Promise<BranchEntry[]> {
+  return invoke<BranchEntry[]>("git_branch_list");
+}
+
 export function recipePlan(
   id: string,
   values: InputValues,
@@ -87,6 +94,16 @@ export function recipeCancel(): Promise<void> {
 }
 
 export type { Update };
+
+/** This build's version (from tauri.conf.json). */
+export function appVersion(): Promise<string> {
+  return getVersion();
+}
+
+/** True if Branchdial had run on this machine before this launch (an update, not a fresh install). */
+export function appRanBefore(): Promise<boolean> {
+  return invoke<boolean>("app_ran_before");
+}
 
 /** `checkForUpdates` from ~/.branchdial/config.yml (default true). */
 export function updatesAutoCheck(): Promise<boolean> {

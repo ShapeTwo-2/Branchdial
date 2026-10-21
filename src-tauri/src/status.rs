@@ -82,7 +82,7 @@ pub fn read(cwd: &Path) -> RepoStatus {
     let Some(root) = git::repo_root(cwd) else { return status };
     // --no-optional-locks: never take index.lock in the background, so the
     // user's own git commands can't collide with a status refresh.
-    if let Some(out) = git::git_raw(&root, &["--no-optional-locks", "status", "--porcelain=v2", "--branch", "-z"]) {
+    if let Some(out) = git::git_raw(&root, &["--no-optional-locks", "status", "--porcelain=v2", "--branch", "--ignore-submodules=dirty", "-z"]) {
         parse(&out, &mut status);
     }
     if status.branch.is_some() {

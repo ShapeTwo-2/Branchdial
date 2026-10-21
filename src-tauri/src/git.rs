@@ -35,35 +35,23 @@ fn probe(program: &Path) -> Option<GitInstall> {
     out.status.success().then(|| GitInstall { program: program.to_path_buf(), version })
 }
 
-/// Finds git once per run: PATH first, then (on Windows) the Git for Windows
-/// install folder, for installs that put only Git Bash on PATH.
+/// Finds git once per run, always as an absolute path (never a bare `git`, never
+/// a relative PATH entry). On Windows: the Git for Windows install the registry
+/// names first, then PATH, then the standard install folders.
 pub fn install() -> Option<&'static GitInstall> {
     static GIT: OnceLock<Option<GitInstall>> = OnceLock::new();
     GIT.get_or_init(|| {
-        if let Some(found) = probe(Path::new("git")) {
-            return Some(found);
-        }
+        let mut candidates: Vec<PathBuf> = Vec::new();
         #[cfg(windows)]
-        {
-            let mut candidates: Vec<PathBuf> = Vec::new();
-            if let Some(bash) = crate::shell::find_git_bash() {
-                // <root>\bin\bash.exe -> <root>\cmd\git.exe
-                if let Some(root) = bash.parent().and_then(Path::parent) {
-                    candidates.push(root.join("cmd").join("git.exe"));
-                }
-            }
-            for var in ["ProgramW6432", "ProgramFiles", "LOCALAPPDATA"] {
-                if let Ok(p) = std::env::var(var) {
-                    let base = PathBuf::from(p);
-                    candidates.push(base.join("Git").join("cmd").join("git.exe"));
-                    candidates.push(base.join("Programs").join("Git").join("cmd").join("git.exe"));
-                }
-            }
-            if let Some(found) = candidates.iter().filter(|c| c.is_file()).find_map(|c| probe(c)) {
-                return Some(found);
-            }
-        }
-        None
+        let roots = crate::shell::git_for_windows_roots();
+        #[cfg(windows)]
+        candidates.extend(roots.first().map(|r| r.join("cmd").join("git.exe")));
+        candidates.extend(crate::shell::find_in_path("git"));
+        #[cfg(windows)]
+        candidates.extend(roots.iter().map(|r| r.join("cmd").join("git.exe")));
+        #[cfg(not(windows))]
+        candidates.extend(["/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"].map(PathBuf::from));
+        candidates.iter().filter(|c| c.is_absolute() && c.is_file()).find_map(|c| probe(c))
     })
     .as_ref()
 }
@@ -71,17 +59,66 @@ pub fn install() -> Option<&'static GitInstall> {
 /// Runs `git <args>` in `cwd`; returns trimmed stdout on exit code 0.
 /// None if git is missing or the command fails.
 pub fn git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let out = command(&install()?.program).args(args).current_dir(cwd).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&out.stdout).trim_end_matches(['\r', '\n']).to_string())
+    let out = git_raw(cwd, args)?;
+    Some(String::from_utf8_lossy(&out).trim_end_matches(['\r', '\n']).to_string())
 }
 
 /// Like [`git`] but returns raw stdout (for `-z` output).
 pub fn git_raw(cwd: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let out = command(&install()?.program).args(args).current_dir(cwd).output().ok()?;
+    let program = &install()?.program;
+    let out = command(program).args(hardening(program, cwd, args)).args(args).current_dir(cwd).output().ok()?;
     out.status.success().then_some(out.stdout)
+}
+
+/// `-c` overrides for Branchdial's own background queries, which run whenever the
+/// terminal enters a folder, including folders the user hasn't vetted (a project
+/// downloaded with its `.git`). A repo's config can name programs that git runs
+/// during `status`: an fsmonitor hook and clean/process filters. Those are turned
+/// off here; commands the user runs in the terminal are unaffected. Filters from
+/// the user's own (global/system) config, like Git LFS, keep working.
+fn hardening(program: &Path, cwd: &Path, args: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"].map(String::from).into();
+    // Only commands that read file contents through the index apply filters.
+    if !args.iter().any(|a| matches!(*a, "status" | "diff")) {
+        return out;
+    }
+    for name in repo_filter_names(program, cwd) {
+        for key in ["clean", "smudge", "process"] {
+            out.extend(["-c".to_string(), format!("filter.{name}.{key}=")]);
+        }
+        out.extend(["-c".to_string(), format!("filter.{name}.required=false")]);
+    }
+    out
+}
+
+/// Filter drivers defined by the repo itself (local/worktree config, includes
+/// followed). Reading config never runs anything. Without `--show-scope`
+/// (git < 2.26) every defined filter is treated as the repo's.
+fn repo_filter_names(program: &Path, cwd: &Path) -> Vec<String> {
+    // Exit code 1 just means "no matching keys".
+    let read = |args: &[&str]| {
+        let out = command(program).args(args).current_dir(cwd).output().ok()?;
+        matches!(out.status.code(), Some(0 | 1)).then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let (text, scoped) = match read(&["config", "--includes", "--show-scope", "--get-regexp", r"^filter\."]) {
+        Some(t) => (t, true),
+        None => (read(&["config", "--includes", "--get-regexp", r"^filter\."]).unwrap_or_default(), false),
+    };
+    let mut names: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        if scoped && !matches!(parts.next(), Some("local" | "worktree")) {
+            continue;
+        }
+        // filter.<name>.<key>; the name itself may contain dots.
+        let Some(key) = parts.next().and_then(|k| k.strip_prefix("filter.")) else { continue };
+        if let Some((name, _)) = key.rsplit_once('.') {
+            if !names.iter().any(|n| n == name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
 }
 
 /// Install hint for the current OS, shown when git is missing.
@@ -118,7 +155,6 @@ pub struct RepoContext {
     pub current_branch: Option<String>,
     pub default_branch: Option<String>,
     pub operation: Option<Operation>,
-    pub git_dir: Option<PathBuf>,
     /// Uncommitted changes, from `git status`.
     pub changes: Vec<ChangedFile>,
     /// Branch patterns that need confirmation before pushing (filled in by the caller).
@@ -137,7 +173,7 @@ pub struct ChangedFile {
 
 /// Uncommitted changes in the repo (staged, unstaged, untracked; ignored files excluded).
 pub fn changed_files(root: &Path) -> Vec<ChangedFile> {
-    let Some(out) = git_raw(root, &["--no-optional-locks", "status", "--porcelain=v2", "-z"]) else { return vec![] };
+    let Some(out) = git_raw(root, &["--no-optional-locks", "status", "--porcelain=v2", "--ignore-submodules=dirty", "-z"]) else { return vec![] };
     let mut files = vec![];
     let mut fields = out.split(|b| *b == 0).map(|f| String::from_utf8_lossy(f).into_owned());
     while let Some(line) = fields.next() {
@@ -218,7 +254,6 @@ pub fn context(cwd: &Path) -> RepoContext {
     let current_branch = git(&root, &["symbolic-ref", "--short", "-q", "HEAD"]).filter(|b| !b.is_empty());
     let default_branch = default_branch(&root);
     let operation = operation_in_progress(&root);
-    let git_dir = git(&root, &["rev-parse", "--absolute-git-dir"]).map(PathBuf::from);
     let changes = changed_files(&root);
     RepoContext {
         cwd: Some(cwd.to_path_buf()),
@@ -226,7 +261,6 @@ pub fn context(cwd: &Path) -> RepoContext {
         current_branch,
         default_branch,
         operation,
-        git_dir,
         changes,
         protected: vec![],
     }
@@ -242,20 +276,34 @@ pub fn remote_branch_exists(root: &Path, name: &str) -> bool {
 
 /// Local branches, then origin's branches that have no local counterpart.
 pub fn branch_names(root: &Path) -> Vec<String> {
-    let mut names: Vec<String> = git(root, &["branch", "--format=%(refname:short)"])
-        .map(|s| s.lines().map(String::from).collect())
+    branch_list(root).into_iter().map(|b| b.name).collect()
+}
+
+/// A branch for the branch switcher.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchEntry {
+    pub name: String,
+    /// Only on origin so far; `git switch <name>` creates the local tracking branch.
+    pub remote_only: bool,
+}
+
+/// Local branches, then branches that exist only on origin.
+pub fn branch_list(root: &Path) -> Vec<BranchEntry> {
+    let mut list: Vec<BranchEntry> = git(root, &["branch", "--format=%(refname:short)"])
+        .map(|s| s.lines().map(|n| BranchEntry { name: n.to_string(), remote_only: false }).collect())
         .unwrap_or_default();
     if let Some(remote) = git(root, &["branch", "-r", "--format=%(refname:short)"]) {
         for r in remote.lines() {
             if let Some(n) = r.strip_prefix("origin/") {
-                if n != "HEAD" && !names.iter().any(|x| x == n) {
-                    names.push(n.to_string());
+                if n != "HEAD" && !list.iter().any(|b| b.name == n) {
+                    list.push(BranchEntry { name: n.to_string(), remote_only: true });
                 }
             }
         }
     }
-    names.retain(|n| !n.is_empty() && !n.starts_with('('));
-    names
+    list.retain(|b| !b.name.is_empty() && !b.name.starts_with('('));
+    list
 }
 
 /// origin/HEAD if the remote advertises it, else the first of main/master that exists locally.
@@ -374,6 +422,15 @@ mod tests {
         assert!(probe(&git_exe).is_some(), "{}", git_exe.display());
     }
 
+    /// git is always run by an absolute path, never a bare name looked up at run time.
+    #[test]
+    fn git_is_resolved_to_an_absolute_path() {
+        let git = install().expect("git is required to develop Branchdial");
+        assert!(git.program.is_absolute(), "{}", git.program.display());
+        #[cfg(windows)]
+        assert!(crate::shell::git_for_windows_root().is_some(), "Git for Windows records its install folder");
+    }
+
     #[test]
     fn context_in_repo() {
         let r = TempRepo::new("ctx");
@@ -448,5 +505,39 @@ mod tests {
         let status = Command::new("git").args(["merge", "a"]).current_dir(&r.work).output().unwrap().status;
         assert!(!status.success());
         assert_eq!(operation_in_progress(&r.work), Some(Operation::Merge));
+    }
+
+    /// A downloaded repo's own config names programs git would run during `status`
+    /// (fsmonitor hook, clean/process filters, defined directly and via an include).
+    /// Branchdial's background queries must not run any of them.
+    #[test]
+    fn background_queries_never_run_repo_configured_programs() {
+        let r = TempRepo::new("trap");
+        let marker = r.work.parent().unwrap().join("pwned");
+        let m = marker.to_string_lossy().replace('\\', "/");
+        let append = |what: &str| format!("echo {what} >> '{m}'");
+        r.git(&["config", "core.fsmonitor", &format!("{}; false", append("fsmonitor"))]);
+        r.git(&["config", "filter.evil.clean", &format!("{}; cat", append("clean"))]);
+        r.git(&["config", "filter.evil.process", &format!("{}; false", append("process"))]);
+        // A second driver hidden in an included file.
+        let extra = r.work.parent().unwrap().join("extra.cfg");
+        std::fs::write(&extra, format!("[filter \"sneaky\"]\n\tclean = {}; cat\n", append("included"))).unwrap();
+        r.git(&["config", "include.path", &extra.to_string_lossy().replace('\\', "/")]);
+        std::fs::write(r.work.join(".git/info/attributes"), "*.txt filter=evil\n*.md filter=sneaky\n").unwrap();
+        // Same size, new mtime: git has to re-read (and filter) the contents.
+        std::fs::write(r.work.join("README.md"), "hellO\n").unwrap();
+        std::fs::write(r.work.join("a.txt"), "x").unwrap();
+
+        let _ = crate::status::read(&r.work);
+        let _ = changed_files(&r.work);
+        let _ = context(&r.work);
+        let _ = branch_list(&r.work);
+        let _ = conflicted_files(&r.work);
+        assert!(!marker.exists(), "ran: {}", std::fs::read_to_string(&marker).unwrap_or_default());
+        assert_eq!(changed_files(&r.work).len(), 2, "status still works");
+
+        // Control: plain git really does run them, so the assertion above means something.
+        let _ = Command::new("git").args(["status", "--porcelain"]).current_dir(&r.work).output();
+        assert!(marker.exists(), "the trap should fire without Branchdial's overrides");
     }
 }

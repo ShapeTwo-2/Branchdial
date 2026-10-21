@@ -134,6 +134,110 @@ pre {
   color: var(--accent);
 }
 
+/* ---------- branch switcher ---------- */
+
+.branch-switcher {
+  position: relative;
+}
+
+.branch-btn {
+  width: calc(100% + 12px);
+  margin: -2px -6px;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.branch-btn:hover,
+.branch-btn.open {
+  background: var(--panel-border);
+}
+
+.branch-caret {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.branch-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: -8px;
+  right: -8px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.branch-search {
+  padding: 6px 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.branch-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.branch-options {
+  max-height: 320px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.branch-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  font-family: "Cascadia Mono", "Cascadia Code", Consolas, Menlo, monospace;
+  cursor: pointer;
+}
+
+.branch-option.active {
+  background: var(--panel-border);
+}
+
+.branch-option.current {
+  color: var(--accent);
+  cursor: default;
+}
+
+.branch-option.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.branch-option-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.branch-menu-note {
+  padding: 5px 8px;
+}
+
 .status-row {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -279,8 +383,13 @@ pre {
   border-color: var(--muted);
 }
 
+.sidebar-footer {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 14px 10px;
+}
+
 .update-btn {
-  margin: 0 14px 10px;
   padding: 4px;
   border: none;
   background: transparent;
@@ -319,10 +428,40 @@ pre {
   background: var(--bg);
 }
 
+.terminal-wrap {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
 .terminal-host {
   flex: 1;
   min-width: 0;
   min-height: 0;
+}
+
+/* Real target of the hovered terminal hyperlink. */
+.link-preview {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  max-width: min(80%, 640px);
+  display: flex;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: var(--panel);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.link-url {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---------- buttons ---------- */
@@ -627,6 +766,103 @@ pre {
   max-height: 50vh;
   overflow: auto;
   color: var(--text);
+}
+
+/* Invisible / text-direction characters, made visible wherever text is reviewed. */
+.hidden-char {
+  padding: 0 2px;
+  border-radius: 3px;
+  background: #e06c75;
+  color: #14161b;
+  font-weight: 600;
+  unicode-bidi: isolate;
+}
+
+.trust-view-toggle {
+  display: flex;
+  gap: 6px;
+}
+
+.trust-view-toggle .btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.trust-diff > div {
+  white-space: pre-wrap;
+}
+
+.diff-sign {
+  display: inline-block;
+  width: 1.5ch;
+  -webkit-user-select: none; /* macOS WKWebView */
+  user-select: none;
+}
+
+.diff-add {
+  background: rgba(152, 195, 121, 0.15);
+  color: #a9d48a;
+}
+
+.diff-del {
+  background: rgba(224, 108, 117, 0.15);
+  color: #ef7b84;
+}
+
+.diff-same {
+  color: var(--muted);
+}
+
+.diff-fold {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.whats-new {
+  max-height: 60vh;
+  overflow-y: auto;
+  line-height: 1.5;
+}
+
+.whats-new section + section {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--panel-border);
+}
+
+.whats-new h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  color: var(--accent);
+}
+
+.whats-new h4 {
+  margin: 10px 0 4px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.whats-new p {
+  margin: 6px 0;
+}
+
+.whats-new ul {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.whats-new li + li {
+  margin-top: 4px;
+}
+
+.whats-new code {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--bg);
+  font-family: "Cascadia Mono", "Cascadia Code", Consolas, Menlo, monospace;
+  font-size: 12px;
 }
 
 .update-notes {

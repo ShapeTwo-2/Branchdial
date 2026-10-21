@@ -13,6 +13,8 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before the shell starts and writes ~/.branchdial: was this an update or a fresh install?
+    updates::note_previous_runs();
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -26,6 +28,7 @@ pub fn run() {
             recipes::recipe_plan,
             recipes::recipe_run,
             recipes::git_branches,
+            recipes::git_branch_list,
             runner::recipe_cancel,
             runner::conflict_files,
             runner::conflict_continue,
@@ -35,6 +38,7 @@ pub fn run() {
             status::status_refresh,
             updates::updates_auto_check,
             updates::updates_prepare_install,
+            updates::app_ran_before,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Branchdial")

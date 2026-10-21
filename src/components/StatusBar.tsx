@@ -1,10 +1,14 @@
+import { useRef, useState } from "react";
 import type { GitInfo, RepoStatus } from "../lib/types";
+import { BranchMenu } from "./BranchMenu";
 
 interface Props {
   /** null while the startup check runs. */
   git: GitInfo | null;
   status: RepoStatus | null;
   onRefresh: () => void;
+  /** The branch dropdown; null when it's unavailable (the Switch branch recipe is disabled). */
+  switcher: { disabledReason: string | null; onSwitch: (branch: string) => void } | null;
 }
 
 function basename(path: string) {
@@ -22,7 +26,10 @@ function plural(n: number, word: string) {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
-export function StatusBar({ git, status, onRefresh }: Props) {
+export function StatusBar({ git, status, onRefresh, switcher }: Props) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const switcherRef = useRef<HTMLDivElement>(null);
+
   if (git && !git.install) {
     return (
       <section className="sidebar-section status status-error" role="alert">
@@ -62,6 +69,21 @@ export function StatusBar({ git, status, onRefresh }: Props) {
     .filter(Boolean)
     .join(" · ");
 
+  const branchLabel = (
+    <>
+      <span className="branch-glyph" aria-hidden>
+        ⎇
+      </span>
+      {status.branch ? (
+        <span className="branch-name">{status.branch}</span>
+      ) : (
+        <span className="branch-name detached" title="HEAD is not on a branch">
+          detached at {status.head ?? "?"}
+        </span>
+      )}
+    </>
+  );
+
   return (
     <section className="sidebar-section status" title={status.root}>
       <div className="status-top">
@@ -69,18 +91,33 @@ export function StatusBar({ git, status, onRefresh }: Props) {
         <RefreshButton onClick={onRefresh} />
       </div>
 
-      <div className="status-branch">
-        <span className="branch-glyph" aria-hidden>
-          ⎇
-        </span>
-        {status.branch ? (
-          <span className="branch-name">{status.branch}</span>
-        ) : (
-          <span className="branch-name detached" title="HEAD is not on a branch">
-            detached at {status.head ?? "?"}
-          </span>
-        )}
-      </div>
+      {switcher ? (
+        <div className="branch-switcher" ref={switcherRef}>
+          <button
+            className={`status-branch branch-btn${menuOpen ? " open" : ""}`}
+            title="Switch branch"
+            aria-haspopup="listbox"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((o) => !o)}
+          >
+            {branchLabel}
+            <span className="branch-caret" aria-hidden>
+              ▾
+            </span>
+          </button>
+          {menuOpen && (
+            <BranchMenu
+              container={switcherRef}
+              current={status.branch}
+              disabledReason={switcher.disabledReason}
+              onSwitch={switcher.onSwitch}
+              onClose={() => setMenuOpen(false)}
+            />
+          )}
+        </div>
+      ) : (
+        <div className="status-branch">{branchLabel}</div>
+      )}
 
       <div className="status-row">
         {status.upstream ? (
