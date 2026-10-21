@@ -5,6 +5,12 @@
 # reports the last exit code and the current directory to Branchdial through an
 # invisible escape sequence (OSC 6973). Branchdial strips it from the screen.
 
+# The nonce lets Branchdial ignore look-alike sequences printed by programs.
+# Taken out of the environment first, before any startup file can start a
+# program that would inherit it; kept as an unexported shell variable.
+__rb_nonce="$BRANCHDIAL_NONCE"
+unset BRANCHDIAL_NONCE
+
 # Login environment (on Git for Windows this sets PATH, MSYSTEM and the prompt).
 if [ -f /etc/profile ]; then . /etc/profile; fi
 
@@ -13,11 +19,6 @@ if [ -f ~/.bash_profile ]; then
 elif [ -f ~/.bashrc ]; then
   . ~/.bashrc
 fi
-
-# The nonce lets Branchdial ignore look-alike sequences printed by programs.
-# It is not exported, so child processes never see it.
-__rb_nonce="$BRANCHDIAL_NONCE"
-unset BRANCHDIAL_NONCE
 
 __rb_lastpwd=
 __rb_cwd=

