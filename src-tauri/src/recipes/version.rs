@@ -170,8 +170,9 @@ pub fn plan_bump(root: &Path, files: &[String], how: &str) -> Result<Bump, Strin
         let sibling = |name: &str| if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") };
         match m.kind {
             Kind::PackageJson => {
-                // npm also updates package-lock.json / npm-shrinkwrap.json.
-                let npm = format!("npm version {} --no-git-tag-version --allow-same-version", sh_quote(&new_s));
+                // npm also updates package-lock.json / npm-shrinkwrap.json. --ignore-scripts: only
+                // the version number changes; the repo's (pre/post)version scripts don't run.
+                let npm = format!("npm version {} --no-git-tag-version --allow-same-version --ignore-scripts", sh_quote(&new_s));
                 commands.push(if dir.is_empty() { npm } else { format!("(cd {} && {npm})", sh_quote(dir)) });
                 changed.push(m.rel.clone());
                 for lock in ["package-lock.json", "npm-shrinkwrap.json"] {
@@ -278,7 +279,7 @@ mod tests {
         let b = plan_bump(&r.work, &files(), "minor").unwrap();
         assert_eq!(b.new.to_string(), "0.2.0");
         assert_eq!(b.commands.len(), 4);
-        assert_eq!(b.commands[0], "npm version '0.2.0' --no-git-tag-version --allow-same-version");
+        assert_eq!(b.commands[0], "npm version '0.2.0' --no-git-tag-version --allow-same-version --ignore-scripts");
         assert_eq!(
             b.files,
             vec!["package.json", "package-lock.json", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock", "src-tauri/tauri.conf.json"]

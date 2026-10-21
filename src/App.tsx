@@ -7,6 +7,8 @@ import { AddRecipeDialog } from "./components/AddRecipeDialog";
 import { StatusBar } from "./components/StatusBar";
 import { TrustDialog } from "./components/TrustDialog";
 import { UpdateDialog } from "./components/UpdateDialog";
+import { WhatsNewDialog } from "./components/WhatsNewDialog";
+import { newSince, releases, type Release } from "./lib/changelog";
 import {
   gitInfo,
   onGitStatus,
@@ -15,23 +17,41 @@ import {
   onRunDone,
   onRunStarted,
   onRunStep,
+  recipePlan,
+  recipeRun,
   recipesList,
   statusRefresh,
+  appRanBefore,
+  appVersion,
   updateCheck,
   updatesAutoCheck,
   type Update,
 } from "./lib/ipc";
-import type { GitInfo, Recipe, RecipeList, RepoStatus, SpawnInfo } from "./lib/types";
+import type { GitInfo, InputValues, Recipe, RecipeList, RepoStatus, SpawnInfo } from "./lib/types";
+
+/** The built-in recipe the branch dropdown runs. */
+const SWITCH_RECIPE = "switch-branch";
 
 const SKIPPED_KEY = "branchdial.skippedVersion";
+/** The version whose "What's new" the user has seen (or that was freshly installed). */
+const SEEN_KEY = "branchdial.lastSeenVersion";
 
-function skippedVersion(): string | null {
+function readKey(key: string): string | null {
   try {
-    return localStorage.getItem(SKIPPED_KEY);
+    return localStorage.getItem(key);
   } catch {
     return null;
   }
 }
+
+function writeKey(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // ignore: at worst "What's new" shows once more
+  }
+}
+
 
 export default function App() {
   const [listening, setListening] = useState(false);
@@ -42,11 +62,12 @@ export default function App() {
   const [list, setList] = useState<RecipeList | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [run, setRun] = useState<RunView | null>(null);
-  const [openRecipe, setOpenRecipe] = useState<Recipe | null>(null);
+  const [openRecipe, setOpenRecipe] = useState<{ recipe: Recipe; initial?: InputValues } | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [trustOpen, setTrustOpen] = useState(false);
   // null: closed; "check": the user asked to check now; otherwise found on startup.
   const [updateOpen, setUpdateOpen] = useState<Update | "check" | null>(null);
+  const [whatsNew, setWhatsNew] = useState<{ releases: Release[]; mode: "updated" | "all" } | null>(null);
   const cwdRef = useRef<string | null>(null);
   const focusTerminal = useRef<() => void>(() => {});
 
@@ -111,6 +132,25 @@ export default function App() {
       .catch(() => setGit({ install: null, installHint: "Could not check for git." }));
   }, []);
 
+  // First launch after an update: show what changed since the version last seen.
+  // A fresh install shows nothing. Updates from versions before 1.1.0 (which kept no
+  // record) are recognised by Branchdial's folder already existing at startup.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const current = await appVersion();
+        const seen = readKey(SEEN_KEY);
+        writeKey(SEEN_KEY, current);
+        if (seen === current) return;
+        if (seen === null && !(await appRanBefore())) return;
+        const notes = newSince(seen, current);
+        if (notes.length) setWhatsNew({ releases: notes, mode: "updated" });
+      } catch {
+        // not worth an error on startup
+      }
+    })();
+  }, []);
+
   // Startup update check, a few seconds in so it doesn't compete with the shell starting.
   // Offline or failing checks stay silent; "Check for updates" shows the error.
   useEffect(() => {
@@ -118,7 +158,7 @@ export default function App() {
       try {
         if (!(await updatesAutoCheck())) return;
         const u = await updateCheck();
-        if (u && u.version !== skippedVersion()) setUpdateOpen((open) => open ?? u);
+        if (u && u.version !== readKey(SKIPPED_KEY)) setUpdateOpen((open) => open ?? u);
       } catch {
         // ignore
       }
@@ -147,26 +187,65 @@ export default function App() {
     focusTerminal.current();
   }, []);
 
+  // Branch dropdown: a clean switch runs straight away in the terminal. Anything that
+  // needs a decision (uncommitted changes, a confirmation, an error) opens the recipe
+  // dialog with the branch filled in.
+  const switchRecipe = list?.recipes.find((r) => r.id === SWITCH_RECIPE) ?? null;
+  const switchBranch = async (branch: string) => {
+    if (!switchRecipe) return;
+    const values = { branch };
+    try {
+      const p = await recipePlan(SWITCH_RECIPE, values, { staged: null, stashFirst: false });
+      // Skipping the preview is only for Branchdial's own one-step `git switch`. A
+      // .branchdial.yml (or the global file) can replace this recipe by id; then its
+      // steps are shown in the dialog like any other recipe before they run.
+      const ownSwitch =
+        switchRecipe.source === "builtin" && p.steps.length === 1 && p.steps[0].command.startsWith("git switch ");
+      if (ownSwitch && p.errors.length === 0 && !p.dirtySwitch && p.risks.length === 0 && !switchRecipe.confirm) {
+        await recipeRun(SWITCH_RECIPE, values, p.steps.map((s) => s.command), {
+          staged: null,
+          stashFirst: false,
+          allowDirtySwitch: false,
+          confirmed: false,
+        });
+        focusTerminal.current();
+        return;
+      }
+    } catch {
+      // The dialog re-plans and shows what went wrong.
+    }
+    setOpenRecipe({ recipe: switchRecipe, initial: values });
+  };
+
   const closeDialog = () => {
     setOpenRecipe(null);
     setAddOpen(false);
     setTrustOpen(false);
     setUpdateOpen(null);
+    setWhatsNew(null);
     focusTerminal.current();
   };
 
   return (
     <div className="app">
       <Sidebar
-        statusBar={<StatusBar git={git} status={status} onRefresh={() => void statusRefresh()} />}
+        statusBar={
+          <StatusBar
+            git={git}
+            status={status}
+            onRefresh={() => void statusRefresh()}
+            switcher={switchRecipe && { disabledReason, onSwitch: (b) => void switchBranch(b) }}
+          />
+        }
         list={list}
         listError={listError}
         disabledReason={disabledReason}
         onRefresh={refresh}
-        onOpen={setOpenRecipe}
+        onOpen={(recipe) => setOpenRecipe({ recipe })}
         onAdd={() => setAddOpen(true)}
         onReviewTrust={() => setTrustOpen(true)}
         onCheckUpdates={() => setUpdateOpen("check")}
+        onWhatsNew={() => setWhatsNew({ releases: releases(), mode: "all" })}
       />
       <main className="main">
         {run && <RunPanel run={run} status={status} onDismiss={dismissRun} />}
@@ -181,7 +260,14 @@ export default function App() {
           />
         )}
       </main>
-      {openRecipe && <RecipeDialog key={openRecipe.id} recipe={openRecipe} onClose={closeDialog} />}
+      {openRecipe && (
+        <RecipeDialog
+          key={openRecipe.recipe.id}
+          recipe={openRecipe.recipe}
+          initial={openRecipe.initial}
+          onClose={closeDialog}
+        />
+      )}
       {trustOpen && list?.pendingTrust && (
         <TrustDialog
           pending={list.pendingTrust}
@@ -192,16 +278,14 @@ export default function App() {
           }}
         />
       )}
-      {updateOpen && (
+      {whatsNew && <WhatsNewDialog releases={whatsNew.releases} mode={whatsNew.mode} onClose={closeDialog} />}
+      {/* After "What's new" is closed, so the two never stack. */}
+      {updateOpen && !whatsNew && (
         <UpdateDialog
           found={updateOpen === "check" ? null : updateOpen}
           running={running}
           onSkip={(version) => {
-            try {
-              localStorage.setItem(SKIPPED_KEY, version);
-            } catch {
-              // ignore
-            }
+            writeKey(SKIPPED_KEY, version);
             closeDialog();
           }}
           onClose={closeDialog}

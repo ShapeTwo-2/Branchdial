@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { gitBranches, recipePlan, recipeRun } from "../lib/ipc";
 import type { InputDef, InputValues, Plan, Recipe } from "../lib/types";
+import { Reveal } from "../lib/hidden";
 
 interface Props {
   recipe: Recipe;
+  /** Pre-filled answers (e.g. the branch picked in the branch dropdown). */
+  initial?: InputValues;
   onClose: () => void;
 }
 
@@ -30,8 +33,8 @@ const STATUS_LABEL: Record<string, string> = {
   "??": "new",
 };
 
-export function RecipeDialog({ recipe, onClose }: Props) {
-  const [values, setValues] = useState<InputValues>(() => initialValues(recipe.inputs));
+export function RecipeDialog({ recipe, initial, onClose }: Props) {
+  const [values, setValues] = useState<InputValues>(() => ({ ...initialValues(recipe.inputs), ...initial }));
   // Files picked for `git add -A`; null until the first plan offers a picker.
   const [staged, setStaged] = useState<string[] | null>(null);
   const [dirtyChoice, setDirtyChoice] = useState<DirtyChoice>("stash");
@@ -286,7 +289,9 @@ export function RecipeDialog({ recipe, onClose }: Props) {
                     checked={staged.includes(f.path)}
                     onChange={(e) => toggleFile(f.path, e.target.checked)}
                   />
-                  <code className="stage-path">{f.path}</code>
+                  <code className="stage-path">
+                    <Reveal text={f.path} />
+                  </code>
                   <span className={`stage-code code-${f.code === "??" ? "new" : f.code}`}>{STATUS_LABEL[f.code] ?? f.code}</span>
                   {f.reason && <span className="stage-reason">⚠ {f.reason}</span>}
                 </label>
@@ -306,7 +311,9 @@ export function RecipeDialog({ recipe, onClose }: Props) {
               const r = current ? riskySteps.get(i) : undefined;
               return (
                 <li key={i} className={`${current ? "" : "stale"}${r ? " risky" : ""}`}>
-                  <code>{s.command}</code>
+                  <code>
+                    <Reveal text={s.command} />
+                  </code>
                   {s.always && (
                     <span className="tag" title="Runs even if an earlier step fails">
                       always

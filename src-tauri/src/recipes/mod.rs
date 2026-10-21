@@ -93,7 +93,7 @@ pub async fn repo_trust(state: State<'_, PtyState>, hash: String) -> Result<(), 
     if trust::hash(&text) != hash {
         return Err(format!("{} changed while you were reviewing it. Review it again.", loader::REPO_FILE));
     }
-    trust::TrustStore::user().ok_or("No home directory to save trust in.")?.trust(&root, &hash)
+    trust::TrustStore::user().ok_or("No home directory to save trust in.")?.trust(&root, &text)
 }
 
 /// Renders the commands for a preview. Always succeeds unless the recipe is gone;
@@ -116,6 +116,13 @@ pub async fn recipe_plan(
 pub async fn git_branches(state: State<'_, PtyState>) -> Result<Vec<String>, String> {
     let root = state.cwd().as_deref().and_then(git::repo_root);
     Ok(root.map(|r| git::branch_names(&r)).unwrap_or_default())
+}
+
+/// Branches for the switcher under the branch name, with which ones exist only on origin.
+#[tauri::command]
+pub async fn git_branch_list(state: State<'_, PtyState>) -> Result<Vec<git::BranchEntry>, String> {
+    let root = state.cwd().as_deref().and_then(git::repo_root);
+    Ok(root.map(|r| git::branch_list(&r)).unwrap_or_default())
 }
 
 /// The user's answers in the dialog, checked again here so the frontend
@@ -162,11 +169,19 @@ pub async fn recipe_run(
     if (recipe.confirm || !p.risks.is_empty()) && !choices.confirmed {
         return Err("This recipe needs confirmation before it runs.".into());
     }
+    let mut temp_files = vec![];
     if let Some((path, contents)) = &p.pathspec_file {
-        std::fs::write(path, contents).map_err(|e| format!("Could not write {}: {e}", path.display()))?;
+        plan::write_pathspec_file(path, contents).map_err(|e| format!("Could not write {}: {e}", path.display()))?;
+        temp_files.push(path.clone());
     }
-    let meta = RunMeta { name: recipe.name.clone(), start_branch: ctx.current_branch.clone() };
-    crate::runner::start_in_app(&app, &state, meta, p.steps)
+    let meta = RunMeta { name: recipe.name.clone(), start_branch: ctx.current_branch.clone(), temp_files };
+    let started = crate::runner::start_in_app(&app, &state, meta, p.steps);
+    if started.is_err() {
+        if let Some((path, _)) = &p.pathspec_file {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    started
 }
 
 /// Runs every built-in recipe's real commands with bash in throwaway repos
@@ -320,6 +335,100 @@ mod builtin_tests {
         assert!(r.work.join("main3.txt").exists());
     }
 
+    /// Hostile values through a real recipe and a real shell: every one must arrive
+    /// literally, and nothing may execute (a "pwned" file appearing = injection).
+    #[test]
+    fn hostile_branch_names_messages_and_file_names_stay_literal() {
+        let r = TempRepo::new("inject");
+        let pwned = || {
+            std::fs::read_dir(&r.work).unwrap().chain(std::fs::read_dir(r.work.parent().unwrap()).unwrap())
+                .filter_map(|e| e.ok())
+                .any(|e| e.file_name().to_string_lossy().starts_with("pwned"))
+        };
+        // Legal git branch names that are shell syntax.
+        let mut branches = vec!["feat/$(touch${IFS}pwned1)", "feat/`touch${IFS}pwned2`", "feat/a'b", "feat/x;touch${IFS}pwned3", "feat/$HOME&"];
+        if cfg!(unix) {
+            branches.push("feat/x|touch${IFS}pwned8"); // `|` can't be in a Windows file name (loose refs are files)
+        }
+        let msg = "it's \"quoted\" `touch pwned4` $(touch pwned5) ${HOME} \\ !! 'end";
+        for (i, branch) in branches.iter().enumerate() {
+            std::fs::write(r.work.join(format!("f{i}.txt")), "x").unwrap();
+            let res = run(&r, "bcp", &[("branch", json!(branch)), ("msg", json!(msg))]);
+            assert!(all_ok(&res), "{branch}: {res:?}");
+            assert_eq!(head(&r), *branch);
+            assert_eq!(git::git(&r.origin, &["log", "-1", "--format=%s", branch]).unwrap(), msg);
+        }
+        assert!(!pwned(), "a branch name or message was executed");
+
+        // File names with spaces, quotes, a leading "-", unicode and shell syntax,
+        // staged through the picker (.env stays unchecked, so names are typed inline).
+        let mut names = vec!["has space.txt", "quo'te.txt", "-leading.txt", "ünïcødé ✓.txt", "$(touch pwned6).txt", "`touch pwned7`.txt"];
+        if cfg!(unix) {
+            names.push("dq\"uote.txt");
+        }
+        for n in &names {
+            std::fs::write(r.work.join(n), "x").unwrap();
+        }
+        std::fs::write(r.work.join(".env"), "SECRET=1").unwrap();
+        let res = run(&r, "bcp", &[("branch", json!("feat/files")), ("msg", json!("files"))]);
+        assert!(all_ok(&res), "{res:?}");
+        assert!(res[1].0.starts_with("git add -- "), "picker rewrote the add step: {}", res[1].0);
+        // -z: names exactly as stored. Without it git C-quotes names containing `"` or `\`
+        // (core.quotePath=false only stops quoting non-ASCII), e.g. "dq\"uote.txt".
+        let committed = git::git_raw(&r.work, &["show", "--name-only", "-z", "--format="]).unwrap();
+        let committed = String::from_utf8(committed).unwrap();
+        let mut got: Vec<&str> = committed.split('\0').map(|s| s.trim_start_matches('\n')).filter(|s| !s.is_empty()).collect();
+        got.sort();
+        let mut want = names.clone();
+        want.sort();
+        assert_eq!(got, want, ".env must not be committed; every other name exactly once");
+        assert!(!pwned(), "a file name was executed");
+    }
+
+    /// Values that must be refused before anything runs.
+    #[test]
+    fn refuses_option_like_and_multiline_values() {
+        let r = TempRepo::new("refuse");
+        let ctx = git::context(&r.work);
+        let bcp = loader::load(None).recipes.into_iter().find(|x| x.id == "bcp").unwrap();
+        let errors = |branch: &str, msg: &str| {
+            let values = HashMap::from([("branch".to_string(), json!(branch)), ("msg".to_string(), json!(msg))]);
+            plan::plan(&bcp, &values, &ctx).errors.into_iter().filter_map(|e| e.input).collect::<Vec<_>>()
+        };
+        assert_eq!(errors("-f", "ok"), ["branch"], "leading - would be read as an option");
+        assert_eq!(errors("--force", "ok"), ["branch"]);
+        for bad_msg in ["two\nlines", "cr\rhere", "esc \x1b[31m", "ctrl-u \x15", "tab\there", "nul\0", "c1 \u{9b}"] {
+            assert_eq!(errors("ok", bad_msg), ["msg"], "{bad_msg:?}");
+        }
+        // Text that displays differently from what it is (Trojan Source).
+        for hidden in ["fix \u{202E}txt.exe", "zero\u{200B}width", "bom\u{FEFF}", "isolate \u{2066}x\u{2069}", "line\u{2028}sep", "tag \u{E0041}"] {
+            assert_eq!(errors("ok", hidden), ["msg"], "{hidden:?}");
+        }
+        assert_eq!(errors("ok", "ünïcødé ✓ 日本語 émoji 🎉"), Vec::<String>::new(), "ordinary unicode is fine");
+    }
+
+    #[test]
+    fn switch_branch_local_and_origin_only() {
+        let r = TempRepo::new("switch");
+        r.git(&["branch", "local-one"]);
+        // On origin only: pushing a new name also creates origin/<name> here.
+        r.git(&["push", "-q", "origin", "main:team/feature"]);
+        let list = git::branch_list(&r.work);
+        let entry = |n: &str| list.iter().find(|b| b.name == n).cloned();
+        assert_eq!(entry("local-one").map(|b| b.remote_only), Some(false));
+        assert_eq!(entry("team/feature").map(|b| b.remote_only), Some(true));
+        assert_eq!(list.iter().filter(|b| b.name == "main").count(), 1, "main is local and on origin: listed once");
+
+        assert!(all_ok(&run(&r, "switch-branch", &[("branch", json!("local-one"))])));
+        assert_eq!(head(&r), "local-one");
+
+        // Switching to an origin-only branch creates the local branch, tracking origin.
+        assert!(all_ok(&run(&r, "switch-branch", &[("branch", json!("team/feature"))])));
+        assert_eq!(head(&r), "team/feature");
+        assert_eq!(git::git(&r.work, &["rev-parse", "--abbrev-ref", "@{upstream}"]).unwrap(), "origin/team/feature");
+        assert!(!git::branch_list(&r.work).iter().any(|b| b.remote_only));
+    }
+
     #[test]
     fn stash_switch_pops_only_its_own_stash() {
         let r = TempRepo::new("stash");
@@ -358,7 +467,20 @@ mod builtin_tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
         };
-        write("package.json", "{\n  \"name\": \"demo\",\n  \"version\": \"0.1.0\"\n}\n");
+        // Lifecycle scripts a downloaded repo could ship: the bump must not run them.
+        write(
+            "package.json",
+            r#"{
+  "name": "demo",
+  "version": "0.1.0",
+  "scripts": {
+    "preversion": "node -e \"require('fs').writeFileSync('pwned-pre','x')\"",
+    "version": "node -e \"require('fs').writeFileSync('pwned-version','x')\"",
+    "postversion": "node -e \"require('fs').writeFileSync('pwned-post','x')\""
+  }
+}
+"#,
+        );
         write("src-tauri/Cargo.toml", "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n");
         write("src-tauri/Cargo.lock", "[[package]]\nname = \"demo\"\nversion = \"0.1.0\"\n");
         write("src-tauri/tauri.conf.json", "{\n  \"version\": \"0.1.0\"\n}\n");
@@ -383,6 +505,9 @@ mod builtin_tests {
             assert!(body.contains("0.2.0") && !body.contains("0.1.0"), "{f}: {body}");
         }
         assert_eq!(show(&["status", "--porcelain"]), " M unrelated.txt");
+        for f in ["pwned-pre", "pwned-version", "pwned-post"] {
+            assert!(!r.work.join(f).exists(), "npm ran the repo's {f} script");
+        }
     }
 
     #[test]

