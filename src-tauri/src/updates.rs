@@ -3,7 +3,24 @@
 //! user's setting and closes the shell before the installer takes over.
 
 use crate::{config, pty::PtyState};
+use std::sync::OnceLock;
 use tauri::State;
+
+/// Whether Branchdial had run on this machine before this launch. Every version
+/// writes `~/.branchdial/shell/` when its terminal starts, so this is read once at
+/// startup, before that happens. It tells an update from a fresh install when the
+/// frontend has no record of the last version seen (versions before 1.1.0 kept none).
+static RAN_BEFORE: OnceLock<bool> = OnceLock::new();
+
+/// Call first thing at startup.
+pub fn note_previous_runs() {
+    RAN_BEFORE.get_or_init(|| config::app_dir().is_some_and(|d| d.join("shell").exists()));
+}
+
+#[tauri::command]
+pub async fn app_ran_before() -> Result<bool, String> {
+    Ok(RAN_BEFORE.get().copied().unwrap_or(false))
+}
 
 /// Whether to check for updates on startup (`checkForUpdates` in config.yml, default on).
 /// "Check for updates" in the sidebar works either way.

@@ -156,10 +156,48 @@ fn detect_default() -> Result<PathBuf, String> {
         .into())
 }
 
-/// Looks in the standard install locations, then next to whatever `git.exe` is on PATH.
+/// The absolute directories in a PATH value, in order. Relative entries (`.`,
+/// `bin`, an empty entry) would resolve against Branchdial's own working
+/// directory, which can be a folder the user right-clicked ("Open Branchdial
+/// here"), so a program planted there could be picked up; they are skipped.
+pub fn absolute_dirs(path: &std::ffi::OsStr) -> Vec<PathBuf> {
+    std::env::split_paths(path).filter(|d| d.is_absolute()).collect()
+}
+
+/// `name` (plus `.exe` on Windows) in the absolute PATH directories.
+pub fn find_in_path(name: &str) -> Option<PathBuf> {
+    let file = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+    absolute_dirs(&std::env::var_os("PATH")?).into_iter().map(|d| d.join(&file)).find(|p| p.is_file())
+}
+
+/// Git for Windows' install folder, as its installer recorded it in the registry
+/// (machine-wide, then per-user). Read with the system's own reg.exe.
 #[cfg(windows)]
-pub fn find_git_bash() -> Option<PathBuf> {
-    let mut roots: Vec<PathBuf> = Vec::new();
+pub fn git_for_windows_root() -> Option<PathBuf> {
+    use std::os::windows::process::CommandExt;
+    let system_root = std::env::var_os("SystemRoot").map(PathBuf::from).filter(|p| p.is_absolute())?;
+    let reg = system_root.join("System32").join("reg.exe");
+    for hive in ["HKLM", "HKCU"] {
+        let out = std::process::Command::new(&reg)
+            .args(["query", &format!(r"{hive}\SOFTWARE\GitForWindows"), "/v", "InstallPath"])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        // "    InstallPath    REG_SZ    C:\Program Files\Git"
+        let root = text.lines().find_map(|l| l.split_once("REG_SZ").map(|(_, v)| PathBuf::from(v.trim())));
+        if let Some(root) = root.filter(|r| r.is_absolute() && r.is_dir()) {
+            return Some(root);
+        }
+    }
+    None
+}
+
+/// Git for Windows' install folders: the registry's, the standard locations, then
+/// the folder of a `git.exe` found in an absolute PATH directory.
+#[cfg(windows)]
+pub fn git_for_windows_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = git_for_windows_root().into_iter().collect();
     for var in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
         if let Ok(p) = std::env::var(var) {
             roots.push(PathBuf::from(p).join("Git"));
@@ -169,19 +207,16 @@ pub fn find_git_bash() -> Option<PathBuf> {
         roots.push(PathBuf::from(p).join("Programs").join("Git"));
     }
     // git.exe usually lives in <root>\cmd\ or <root>\mingw64\bin\.
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            if dir.join("git.exe").is_file() {
-                for up in dir.ancestors().skip(1).take(2) {
-                    roots.push(up.to_path_buf());
-                }
-            }
-        }
+    if let Some(git) = find_in_path("git") {
+        roots.extend(git.ancestors().skip(2).take(2).map(Path::to_path_buf));
     }
+    roots.retain(|r| r.is_absolute());
     roots
-        .into_iter()
-        .map(|r| r.join("bin").join("bash.exe"))
-        .find(|p| p.is_file())
+}
+
+#[cfg(windows)]
+pub fn find_git_bash() -> Option<PathBuf> {
+    git_for_windows_roots().into_iter().map(|r| r.join("bin").join("bash.exe")).find(|p| p.is_file())
 }
 
 #[cfg(not(windows))]
@@ -214,6 +249,15 @@ mod tests {
         assert_eq!(args(r"C:\Git\bin\bash.exe"), vec!["--login", "-i"]);
         assert_eq!(args("/bin/zsh"), vec!["-l", "-i"]);
         assert!(args("/bin/sh").is_empty());
+    }
+
+    /// Relative PATH entries would resolve inside whatever folder Branchdial was
+    /// started in (e.g. a downloaded project via "Open Branchdial here").
+    #[test]
+    fn relative_path_entries_are_ignored() {
+        let (abs1, abs2) = if cfg!(windows) { (r"C:\Tools", r"D:\bin") } else { ("/usr/bin", "/opt/x") };
+        let path = std::env::join_paths([abs1, ".", "", "bin", abs2, "..\\up", "../up"]).unwrap();
+        assert_eq!(absolute_dirs(&path), vec![PathBuf::from(abs1), PathBuf::from(abs2)]);
     }
 
     #[test]

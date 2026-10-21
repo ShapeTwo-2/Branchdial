@@ -80,6 +80,8 @@ export interface LoadError {
 }
 
 export interface PendingTrust {
+  /** The version trusted before, when the file changed (null if it wasn't kept). */
+  previous: string | null;
   file: string;
   content: string;
   hash: string;
@@ -130,6 +132,12 @@ export interface Plan {
 }
 
 /** Answers from the dialog that the backend re-checks before running. */
+export interface BranchEntry {
+  name: string;
+  /** Only on origin so far; switching creates the local tracking branch. */
+  remoteOnly: boolean;
+}
+
 export interface RunChoices {
   staged: string[] | null;
   stashFirst: boolean;

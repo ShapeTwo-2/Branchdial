@@ -70,6 +70,15 @@
     - run: git merge "origin/{{default_branch}}"
       when: strategy == merge
 
+# Also what the branch dropdown under the repo name runs.
+- id: switch-branch
+  name: Switch branch
+  description: Switch to another branch (one that exists only on origin is checked out as a local tracking branch)
+  inputs:
+    - { id: branch, label: Switch to, type: branch, exists: true, required: true }
+  steps:
+    - git switch "{{branch}}"
+
 - id: stash-switch
   name: Stash & switch
   description: Stash all changes (including untracked), switch branch, optionally bring the changes along
