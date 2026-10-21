@@ -40,6 +40,10 @@ again next launch; **Skip this version** stays quiet until the next one. **Check
 the bottom of the sidebar checks at any time. Updates wait while a recipe is running. Set
 `checkForUpdates: false` in the [config](#configuration) to turn off the startup check.
 
+After an update, however it was installed, Branchdial shows **What's new** once on its first
+launch, covering every version since the one you last used. **What's new** at the bottom of the
+sidebar shows the full [changelog](CHANGELOG.md) any time.
+
 On Linux only the `.AppImage` updates itself; with the `.deb`, install the new one from Releases.
 
 ## Using it
@@ -266,6 +270,11 @@ the update only once you publish the draft. The matching public key is in
 `src-tauri/tauri.conf.json`. Keep a backup of the private key: without it, installed copies can't
 verify, and so won't install, any future update. A local `npm run tauri build` needs the same two
 variables set.
+
+**Release notes:** before running *Version bump*, add a `## X.Y.Z` section for the new version to
+[CHANGELOG.md](CHANGELOG.md). The release workflow uses it as the GitHub release text (which the
+in-app update prompt shows), and the app bundles the file for its **What's new** window. Without a
+section the release gets a generic text and a warning in the workflow log.
 
 ## Code signing policy
 

@@ -7,6 +7,8 @@ import { AddRecipeDialog } from "./components/AddRecipeDialog";
 import { StatusBar } from "./components/StatusBar";
 import { TrustDialog } from "./components/TrustDialog";
 import { UpdateDialog } from "./components/UpdateDialog";
+import { WhatsNewDialog } from "./components/WhatsNewDialog";
+import { newSince, releases, type Release } from "./lib/changelog";
 import {
   gitInfo,
   onGitStatus,
@@ -19,6 +21,8 @@ import {
   recipeRun,
   recipesList,
   statusRefresh,
+  appRanBefore,
+  appVersion,
   updateCheck,
   updatesAutoCheck,
   type Update,
@@ -29,14 +33,25 @@ import type { GitInfo, InputValues, Recipe, RecipeList, RepoStatus, SpawnInfo } 
 const SWITCH_RECIPE = "switch-branch";
 
 const SKIPPED_KEY = "branchdial.skippedVersion";
+/** The version whose "What's new" the user has seen (or that was freshly installed). */
+const SEEN_KEY = "branchdial.lastSeenVersion";
 
-function skippedVersion(): string | null {
+function readKey(key: string): string | null {
   try {
-    return localStorage.getItem(SKIPPED_KEY);
+    return localStorage.getItem(key);
   } catch {
     return null;
   }
 }
+
+function writeKey(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // ignore: at worst "What's new" shows once more
+  }
+}
+
 
 export default function App() {
   const [listening, setListening] = useState(false);
@@ -52,6 +67,7 @@ export default function App() {
   const [trustOpen, setTrustOpen] = useState(false);
   // null: closed; "check": the user asked to check now; otherwise found on startup.
   const [updateOpen, setUpdateOpen] = useState<Update | "check" | null>(null);
+  const [whatsNew, setWhatsNew] = useState<{ releases: Release[]; mode: "updated" | "all" } | null>(null);
   const cwdRef = useRef<string | null>(null);
   const focusTerminal = useRef<() => void>(() => {});
 
@@ -116,6 +132,25 @@ export default function App() {
       .catch(() => setGit({ install: null, installHint: "Could not check for git." }));
   }, []);
 
+  // First launch after an update: show what changed since the version last seen.
+  // A fresh install shows nothing. Updates from versions before 1.1.0 (which kept no
+  // record) are recognised by Branchdial's folder already existing at startup.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const current = await appVersion();
+        const seen = readKey(SEEN_KEY);
+        writeKey(SEEN_KEY, current);
+        if (seen === current) return;
+        if (seen === null && !(await appRanBefore())) return;
+        const notes = newSince(seen, current);
+        if (notes.length) setWhatsNew({ releases: notes, mode: "updated" });
+      } catch {
+        // not worth an error on startup
+      }
+    })();
+  }, []);
+
   // Startup update check, a few seconds in so it doesn't compete with the shell starting.
   // Offline or failing checks stay silent; "Check for updates" shows the error.
   useEffect(() => {
@@ -123,7 +158,7 @@ export default function App() {
       try {
         if (!(await updatesAutoCheck())) return;
         const u = await updateCheck();
-        if (u && u.version !== skippedVersion()) setUpdateOpen((open) => open ?? u);
+        if (u && u.version !== readKey(SKIPPED_KEY)) setUpdateOpen((open) => open ?? u);
       } catch {
         // ignore
       }
@@ -187,6 +222,7 @@ export default function App() {
     setAddOpen(false);
     setTrustOpen(false);
     setUpdateOpen(null);
+    setWhatsNew(null);
     focusTerminal.current();
   };
 
@@ -209,6 +245,7 @@ export default function App() {
         onAdd={() => setAddOpen(true)}
         onReviewTrust={() => setTrustOpen(true)}
         onCheckUpdates={() => setUpdateOpen("check")}
+        onWhatsNew={() => setWhatsNew({ releases: releases(), mode: "all" })}
       />
       <main className="main">
         {run && <RunPanel run={run} status={status} onDismiss={dismissRun} />}
@@ -241,16 +278,14 @@ export default function App() {
           }}
         />
       )}
-      {updateOpen && (
+      {whatsNew && <WhatsNewDialog releases={whatsNew.releases} mode={whatsNew.mode} onClose={closeDialog} />}
+      {/* After "What's new" is closed, so the two never stack. */}
+      {updateOpen && !whatsNew && (
         <UpdateDialog
           found={updateOpen === "check" ? null : updateOpen}
           running={running}
           onSkip={(version) => {
-            try {
-              localStorage.setItem(SKIPPED_KEY, version);
-            } catch {
-              // ignore
-            }
+            writeKey(SKIPPED_KEY, version);
             closeDialog();
           }}
           onClose={closeDialog}

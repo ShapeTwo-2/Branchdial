@@ -383,8 +383,13 @@ pre {
   border-color: var(--muted);
 }
 
+.sidebar-footer {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 14px 10px;
+}
+
 .update-btn {
-  margin: 0 14px 10px;
   padding: 4px;
   border: none;
   background: transparent;
@@ -811,6 +816,53 @@ pre {
 .diff-fold {
   color: var(--muted);
   font-style: italic;
+}
+
+.whats-new {
+  max-height: 60vh;
+  overflow-y: auto;
+  line-height: 1.5;
+}
+
+.whats-new section + section {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--panel-border);
+}
+
+.whats-new h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  color: var(--accent);
+}
+
+.whats-new h4 {
+  margin: 10px 0 4px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.whats-new p {
+  margin: 6px 0;
+}
+
+.whats-new ul {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.whats-new li + li {
+  margin-top: 4px;
+}
+
+.whats-new code {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--bg);
+  font-family: "Cascadia Mono", "Cascadia Code", Consolas, Menlo, monospace;
+  font-size: 12px;
 }
 
 .update-notes {

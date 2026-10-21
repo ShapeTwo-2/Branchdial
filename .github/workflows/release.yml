@@ -52,6 +52,21 @@ jobs:
 
       - run: npm ci
 
+      # The release text (also shown in the in-app update prompt) is this version's
+      # section of CHANGELOG.md, the same notes the app's "What's new" shows.
+      - name: Release notes from CHANGELOG.md
+        id: notes
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          notes=$(awk -v v="$version" '/^## /{ p = ($2 == v || $2 == "v" v); next } /^# /{ p = 0 } p' CHANGELOG.md)
+          if [ -z "$(echo "$notes" | tr -d '[:space:]')" ]; then
+            echo "::warning::CHANGELOG.md has no section for $version"
+            notes="See the assets below to download and install this version."
+          fi
+          delim="NOTES_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+          { echo "body<<$delim"; echo "$notes"; echo "$delim"; } >> "$GITHUB_OUTPUT"
+
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -61,7 +76,7 @@ jobs:
         with:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
           releaseName: "Branchdial v__VERSION__"
-          releaseBody: "See the assets below to download and install this version."
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
