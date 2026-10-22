@@ -1,7 +1,7 @@
 {
   "name": "branchdial",
   "private": true,
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "A real terminal with one-click git workflow buttons",
   "license": "MIT",
   "type": "module",
