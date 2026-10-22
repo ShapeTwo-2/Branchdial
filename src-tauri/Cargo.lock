@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "branchdial"
-version = "1.0.2"
+version = "1.1.0"
 dependencies = [
  "dirs",
  "getrandom 0.3.4",
